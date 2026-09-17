@@ -176,6 +176,13 @@ came later and has not been re-measured against `claude-real-video`. It aims at 
 camera footage with cuts `claude-real-video` has scene detection and a motion channel that seenby does not
 try to match. A side-by-side table on public recordings will replace this paragraph.
 
+## Claude Code skill
+
+`skill/SKILL.md` teaches an agent when to run seenby, how to read `frames.json`, and what to do when the
+console warns. Install it for one project by copying the folder to `.claude/skills/seenby/` inside that
+project, or for every project with `cp -r skill ~/.claude/skills/seenby`. Any harness with a terminal can use
+the scripts directly; the skill is a convenience.
+
 ## Tests
 
 ```

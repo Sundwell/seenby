@@ -91,9 +91,10 @@ RPT-8  `parse_volume(text)` takes the stderr of `ffmpeg -i <video> -af volumedet
 RPT-9  [hands-on] `measure_volume(video)` returns `(-91.0, -91.0)` (ffmpeg's silence floor) when ffprobe finds
        no audio stream, otherwise runs that ffmpeg command and returns `parse_volume(stderr)`. Screen captures
        often have no audio track at all; that is silence, not an error. `--transcribe-anyway` on such a
-       recording transcribes nothing, prints `no audio track in <video>, nothing to transcribe` to stderr and
-       writes the report without a Speech section (hands-on; the tests fake `measure_volume` and
-       `transcribe`).
+       recording reaches `transcribe`, which prints `no audio track in <video>, nothing to transcribe` to
+       stderr and returns `([], {"language": "none", "language_probability": 0.0, "device": "none", "model":
+       <model>})` without loading a model, so the report's Speech section reads `(nothing transcribed)`
+       (hands-on; `main()` itself never calls ffprobe, the tests fake `measure_volume` and `transcribe`).
        Evidence: on the nine silent recordings mean is `-91.0`, max `-84.3` or `-91.0`; on
        the one recording with an audio track mean `-53.7`, max `-31.3`. That recording turned out to be steady background noise
        (RMS about -55 dB throughout), not speech: `small` transcribes nothing, `large-v3` and `large-v3-turbo`

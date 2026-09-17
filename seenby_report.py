@@ -102,6 +102,9 @@ def transcribe(video, model, device='auto'):
         from faster_whisper import WhisperModel
     except ImportError:
         raise ImportError('faster-whisper is not installed: pip install -r requirements-whisper.txt')
+    if not _has_audio(video):
+        print('no audio track in %s, nothing to transcribe' % video, file=sys.stderr)
+        return [], {'language': 'none', 'language_probability': 0.0, 'device': 'none', 'model': model}
     _preload_cuda_libraries()
     used = 'cpu'
     if device in ('auto', 'cuda'):
@@ -224,9 +227,7 @@ def main():
         print(error, file=sys.stderr)
         return 1
     speech = info = None
-    if needs_transcription(audio[0], audio[1], args.transcribe_anyway) and not _has_audio(args.video):
-        print('no audio track in %s, nothing to transcribe' % args.video, file=sys.stderr)
-    elif needs_transcription(audio[0], audio[1], args.transcribe_anyway):
+    if needs_transcription(audio[0], audio[1], args.transcribe_anyway):
         try:
             speech, info = transcribe(args.video, args.model, args.device)
         except ImportError as error:
