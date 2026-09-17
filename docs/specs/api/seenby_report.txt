@@ -1,0 +1,19 @@
+MAX_DB = -45.0
+MEAN_DB = -80.0
+MIN_CORE_VERSION = 1
+MODEL = 'large-v3-turbo'
+SHAKY = -0.7
+TOLERANCE = 2.0
+def core_path()
+def coverage(segments, duration)
+def frame_intervals(frames, end)
+def load_manifest(out_dir)
+def main()
+def measure_volume(video)
+    """(mean_db, max_db) of the audio track; a recording without one counts as silence."""
+def needs_transcription(mean_db, max_db, anyway)
+def parse_volume(text)
+def render(manifest, speech, audio, model_info)
+def run_core(video, out_dir, tail)
+def speech_for(interval, segments)
+def transcribe(video, model, device='auto')

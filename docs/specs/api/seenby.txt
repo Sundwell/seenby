@@ -1,0 +1,43 @@
+BLOCK = 8
+BLOCK_K = 5.0
+MARGIN = 6
+MAX_FRAMES = 24
+MAX_GAP = 3.0
+PADDING = 4
+SAMPLE_FPS = 2
+SHEET_WIDTH = 1568
+THRESHOLD = 12.0
+THUMB = 32
+VERSION = 1
+def block_max(a, b, bs=8)
+    """Largest mean difference over the bs x bs blocks of two thumbnails."""
+def check_out_dir(out_dir, force)
+    """None when the directory is ours to clean, otherwise the refusal to print."""
+def clean(out_dir)
+    """Remove our own files from a previous run, leave everything else alone."""
+def contact_sheets(paths, out_dir, cols, rows)
+    """Tile frames into `cols x rows` images: an agent reads each in one go."""
+def ffmpeg()
+def ffmpeg_version()
+def ffprobe()
+def fit_to_cap(thumbs, max_frames, threshold, max_gap, block_k=5.0, sample_fps=2)
+    """Raise the threshold until the frames fit the cap. Never cut the tail."""
+def layout(width, height, n_frames, sheet_width=1568, rows=None, tile_width=None)
+    """(grade, tile, cols, rows, sheets) so that no sheet side exceeds sheet_width."""
+def main()
+def parse_probe(text)
+    """(duration, width, height) from ffprobe's csv output, ValueError when any is missing."""
+def probe(path)
+    """Duration and orientation: the contact sheet layout depends on it."""
+def require_tools()
+    """None when ffmpeg and ffprobe are runnable, otherwise the message to print."""
+def save_frames(path, times, out_dir, tile_width)
+def segments(times, start, end, length)
+    """Index of the kept times by stretches of `length` seconds over [start, end]."""
+def select(thumbs, threshold, max_gap, block_k=5.0, sample_fps=2)
+    """Return the timestamps whose frame differs from the last kept frame."""
+def select_frames(thumbs, threshold, max_gap, block_k=5.0, sample_fps=2)
+    """Kept thumbnails as {time, diff, block, reason}, both measured against the last kept one."""
+def thumbnails(path, sample_fps=2, start=0.0, length=None)
+    """Grey THUMB x THUMB thumbnails, sample_fps per second, as one raw stream."""
+def write_json(path, data)

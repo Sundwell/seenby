@@ -1,0 +1,19 @@
+name: tests
+
+on: [push, pull_request]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-dev.txt
+      - name: public API listing is current
+        run: |
+          python3 tools/api_dump.py seenby > docs/specs/api/seenby.txt
+          python3 tools/api_dump.py seenby_report > docs/specs/api/seenby_report.txt
+          git diff --exit-code -- docs/specs/api
+      - run: python3 -m pytest -q tests
