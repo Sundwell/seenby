@@ -470,7 +470,7 @@ def main():
             print('  block rule inactive: bar %.1f (%.1f x %.1f) is at or above 255'
                   % (args.block_k * threshold, args.block_k, threshold))
         cap_active = threshold > args.threshold or max_gap > args.max_gap
-        if cap_active and len(times) >= 5 and timer_share > 0.7:
+        if cap_active and len(times) >= 5:
             options = []
             for cap in (2 * args.max_frames, 3 * args.max_frames):
                 alt_times, alt_thr, alt_gap = fit_to_cap(thumbs, cap, args.threshold, args.max_gap,
@@ -483,8 +483,8 @@ def main():
                 print('  %d of %d frames by the timer; %s' % (timers, len(loop), '; '.join(
                     '--max-frames %d: %d content frames at threshold %.1f (%d sheets)' % o for o in options)))
             else:
-                print('  %d of %d frames by the timer; no cap up to %d adds a content frame, the recording '
-                      'changes slowly or not at all' % (timers, len(loop), options[-1][0]))
+                print('  %d of %d frames by the timer; no cap up to %d adds a content frame'
+                      % (timers, len(loop), options[-1][0]))
         if args.dry_run:
             return 0
 
