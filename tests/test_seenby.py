@@ -1217,6 +1217,11 @@ def segment(n, start, end, frames):
     return {"n": n, "from": start, "to": end, "frames": frames}
 
 
+def manifest_segment(n, start, end, frames, activity=0.0):
+    """A `segments` entry as frames.json carries it (MAN-15): the `segments()` entry plus `activity`."""
+    return dict(segment(n, start, end, frames), activity=activity)
+
+
 SEGMENT_ROWS = [
     (
         [0.0, 3.0, 119.5, 120.0, 200.0],
@@ -1369,6 +1374,16 @@ ALL_TIMER_LINE = (
 LAYOUT_LINE = "  layout: {grade}, tile {tile} px, {cols}x{rows} per sheet"
 MANY_SHEETS_LINE = "  {n} contact sheets are more than 4; consider --max-frames or --from/--to"
 RANGE_LINE = "  range: {start}-{end} s"
+BLOCK_LINE = "  block rule inactive: bar {bar} ({block_k} x {threshold}) is at or above 255"
+BIGGER_CAP_LINE = (
+    "  {timer} of {loop} frames by the timer; "
+    "--max-frames {c2}: {n2} content frames at threshold {t2} ({s2} sheets); "
+    "--max-frames {c3}: {n3} content frames at threshold {t3} ({s3} sheets)"
+)
+NO_CAP_HELPS_LINE = (
+    "  {timer} of {loop} frames by the timer; no cap up to {c3} adds a content frame, "
+    "the recording changes slowly or not at all"
+)
 
 
 def outcome(value):
@@ -1475,8 +1490,10 @@ def recheck(video, out_dir, n, time):
 
 FRAME_KEYS = ["n", "time", "file", "sheet", "reason", "diff", "block", "recheck"]
 ANALYSIS_KEYS = [
-    "sample_fps", "thumbnails", "max_frames", "threshold", "max_gap", "block_k", "range", "segment", "all_timer"
+    "sample_fps", "thumbnails", "max_frames", "threshold", "max_gap", "block_k", "block_active", "range", "segment",
+    "all_timer", "timer_share",
 ]
+SEGMENT_KEYS = ["n", "from", "to", "frames", "activity"]
 TOP_LEVEL_KEYS = ["tool", "version", "ffmpeg", "video", "analysis", "sheet", "frames", "sheets", "segments"]
 VIDEO_KEYS = ["name", "path", "duration", "width", "height", "ratio", "orientation", "grade"]
 SHEET_KEYS = ["cols", "rows", "tile_width", "sheet_width", "count"]
@@ -1521,16 +1538,18 @@ def static_30_manifest():
             "threshold": {"requested": 12.0, "effective": 12.0},
             "max_gap": {"requested": 3.0, "effective": 3.0},
             "block_k": 5.0,
+            "block_active": True,
             "range": {"from": 0.0, "to": 15.0},
             "segment": 120.0,
             "all_timer": True,
+            "timer_share": 1.0,
         },
         "sheet": {"cols": 3, "rows": 3, "tile_width": 516, "sheet_width": 1568, "count": 1},
         "frames": [
             frame_entry(n, t, r) for n, (t, r) in enumerate(zip(STATIC_30_TIMES, STATIC_30_REASONS), start=1)
         ],
         "sheets": [{"file": "sheet-01.jpg", "frames": [1, 6]}],
-        "segments": [{"n": 1, "from": 0.0, "to": 15.0, "frames": [1, 2, 3, 4, 5, 6]}],
+        "segments": [{"n": 1, "from": 0.0, "to": 15.0, "frames": [1, 2, 3, 4, 5, 6], "activity": 0.0}],
     }
 
 
@@ -1555,8 +1574,8 @@ STATIC_30_STDOUT = (
 @pytest.mark.spec("CLI-6")
 @pytest.mark.spec("CLI-7")
 @pytest.mark.spec("CLI-17")
-@pytest.mark.spec("CLI-21")
-def test_cli_1_6_7_17_21_landscape_static_run(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-22")
+def test_cli_1_6_7_17_22_landscape_static_run(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["video.mp4"], static(30), sheets=["video-frames/sheet-01.jpg"])
     times = [0.0, 3.0, 6.0, 9.0, 12.0, 14.5]
     frames = [f"video-frames/frame-{i:02d}.jpg" for i in range(1, 7)]
@@ -1588,10 +1607,10 @@ def test_cli_1_explicit_out_dir_is_used(monkeypatch, capsys, tmp_path):
 
 
 @pytest.mark.spec("CLI-17")
-@pytest.mark.spec("CLI-21")
+@pytest.mark.spec("CLI-22")
 @pytest.mark.spec("MAN-3")
 @pytest.mark.spec("MAN-12")
-def test_cli_17_21_man_3_12_portrait_window_layout(monkeypatch, capsys, tmp_path):
+def test_cli_17_22_man_3_12_portrait_window_layout(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["video.mp4", "out"], static(30), probe=(15.0, 600, 800))
     lines = run.out.splitlines()
     assert run.rc == 0
@@ -1605,9 +1624,9 @@ def test_cli_17_21_man_3_12_portrait_window_layout(monkeypatch, capsys, tmp_path
 
 
 @pytest.mark.spec("CLI-17")
-@pytest.mark.spec("CLI-21")
+@pytest.mark.spec("CLI-22")
 @pytest.mark.spec("MAN-12")
-def test_cli_17_21_man_12_phone_layout(monkeypatch, capsys, tmp_path):
+def test_cli_17_22_man_12_phone_layout(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["video.mp4", "out"], static(30), probe=(15.0, 576, 1280))
     lines = run.out.splitlines()
     assert run.rc == 0
@@ -1621,9 +1640,9 @@ def test_cli_17_21_man_12_phone_layout(monkeypatch, capsys, tmp_path):
 
 
 @pytest.mark.spec("CLI-17")
-@pytest.mark.spec("CLI-21")
+@pytest.mark.spec("CLI-22")
 @pytest.mark.spec("MAN-12")
-def test_cli_17_21_man_12_wide_layout(monkeypatch, capsys, tmp_path):
+def test_cli_17_22_man_12_wide_layout(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["video.mp4", "out"], static(30), probe=(15.0, 1920, 1080))
     lines = run.out.splitlines()
     assert run.rc == 0
@@ -1669,8 +1688,8 @@ def test_cli_7_single_frame_skips_contact_sheets_and_lists_the_frame(monkeypatch
 
 
 @pytest.mark.spec("CLI-7")
-@pytest.mark.spec("CLI-21")
-def test_cli_7_21_single_frame_second_line(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-22")
+def test_cli_7_22_single_frame_second_line(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["video.mp4", "out"], static(1), frames=["out/frame-01.jpg"])
     assert run.rc == 0
     assert run.out.splitlines()[1] == "  1 thumbnails, selected 1/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)"
@@ -1769,8 +1788,8 @@ def test_cli_10_threshold_and_max_gap_flags_reach_fit_to_cap(monkeypatch, capsys
 
 
 @pytest.mark.spec("CLI-10")
-@pytest.mark.spec("CLI-21")
-def test_cli_10_21_threshold_and_max_gap_flags_are_printed(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-22")
+def test_cli_10_22_threshold_and_max_gap_flags_are_printed(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["video.mp4", "out", "--threshold", "300", "--max-gap", "7"], alt(30))
     lines = run.out.splitlines()
     assert run.rc == 0
@@ -1786,8 +1805,8 @@ def test_cli_10_max_frames_flag_reaches_fit_to_cap(monkeypatch, capsys, tmp_path
 
 
 @pytest.mark.spec("CLI-10")
-@pytest.mark.spec("CLI-21")
-def test_cli_10_21_max_frames_flag_is_printed_with_effective_values(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-22")
+def test_cli_10_22_max_frames_flag_is_printed_with_effective_values(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["video.mp4", "out", "--max-frames", "2"], alt(20))
     lines = run.out.splitlines()
     assert run.rc == 0
@@ -1937,10 +1956,10 @@ def test_cli_13_probe_failure_leaves_no_manifest(monkeypatch, capsys, tmp_path):
     assert not (tmp_path / "out" / "frames.json").exists()
 
 
-# -------- CLI-21, CLI-15 (CLI-21 is the successor of CLI-18, CLI-14 and CLI-8)
+# -------- CLI-22, CLI-15 (CLI-22 is the successor of CLI-21, CLI-18, CLI-14 and CLI-8)
 
 
-@pytest.mark.spec("CLI-21")
+@pytest.mark.spec("CLI-22")
 @pytest.mark.spec("MAN-1")
 @pytest.mark.spec("MAN-2")
 @pytest.mark.spec("MAN-3")
@@ -1952,8 +1971,8 @@ def test_cli_13_probe_failure_leaves_no_manifest(monkeypatch, capsys, tmp_path):
 @pytest.mark.spec("MAN-11")
 @pytest.mark.spec("MAN-12")
 @pytest.mark.spec("MAN-13")
-@pytest.mark.spec("MAN-14")
-def test_cli_21_man_1_14_static_run_stdout_and_manifest(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("MAN-15")
+def test_cli_22_man_1_15_static_run_stdout_and_manifest(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(30))
     assert run.rc == 0
     assert run.out == STATIC_30_STDOUT
@@ -1962,8 +1981,8 @@ def test_cli_21_man_1_14_static_run_stdout_and_manifest(monkeypatch, capsys, tmp
     assert os.listdir(tmp_path / "out") == ["frames.json"]
 
 
-@pytest.mark.spec("CLI-21")
-def test_cli_21_fewer_than_five_frames_print_six_lines(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-22")
+def test_cli_22_fewer_than_five_frames_print_six_lines(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["video.mp4", "out"], static(7))
     assert run.rc == 0
     assert run.out == (
@@ -1976,8 +1995,8 @@ def test_cli_21_fewer_than_five_frames_print_six_lines(monkeypatch, capsys, tmp_
     )
 
 
-@pytest.mark.spec("CLI-21")
-def test_cli_21_two_sheets_are_joined_on_the_contact_sheets_line(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-22")
+def test_cli_22_two_sheets_are_joined_on_the_contact_sheets_line(monkeypatch, capsys, tmp_path):
     run = run_main(
         monkeypatch, capsys, tmp_path, ["video.mp4", "out"], static(61), sheets=["out/sheet-01.jpg", "out/sheet-02.jpg"]
     )
@@ -1993,36 +2012,42 @@ def test_cli_21_two_sheets_are_joined_on_the_contact_sheets_line(monkeypatch, ca
     )
 
 
-@pytest.mark.spec("CLI-21")
+@pytest.mark.spec("CLI-22")
 @pytest.mark.spec("MAN-11")
-def test_cli_21_man_11_no_all_timer_line_with_four_frames(monkeypatch, capsys, tmp_path):
+def test_cli_22_man_11_no_all_timer_line_with_four_frames(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--threshold", "300", "--max-gap", "7"], alt(30))
     lines = run.out.splitlines()
     assert run.rc == 0
-    assert len(lines) == 6
+    assert len(lines) == 7
     assert lines[1] == "  30 thumbnails, selected 4/24 (threshold 300.0 -> 300.0, max gap 7.0 -> 7.0 s)"
     assert lines[2] == "  frames: 0.0 first, 7.0 timer, 14.0 timer, 14.5 last"
     assert lines[3] == "  layout: window, tile 516 px, 3x3 per sheet"
-    assert lines[5] == MANIFEST_LINE.format(out_dir="out")
+    assert lines[4] == BLOCK_LINE.format(bar="1500.0", block_k="5.0", threshold="300.0")
+    assert lines[5] == "  contact sheets: out/sheet-01.jpg"
+    assert lines[6] == MANIFEST_LINE.format(out_dir="out")
+    assert "frames by the timer;" not in run.out
+    assert "all frames taken by the timer" not in run.out
     data = manifest()
     assert data["analysis"]["all_timer"] is False
     assert data["analysis"]["threshold"] == {"requested": 300.0, "effective": 300.0}
     assert data["analysis"]["max_gap"] == {"requested": 7.0, "effective": 7.0}
 
 
-@pytest.mark.spec("CLI-21")
-def test_cli_21_all_timer_line_carries_the_effective_threshold(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-22")
+def test_cli_22_all_timer_line_carries_the_effective_threshold(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--max-frames", "5"], alt(20))
     lines = run.out.splitlines()
     assert run.rc == 0
-    assert len(lines) == 7
+    assert len(lines) == 9
     assert lines[1] == "  20 thumbnails, selected 5/5 (threshold 12.0 -> 307.5, max gap 3.0 -> 3.0 s)"
     assert lines[2] == "  frames: 0.0 first, 3.0 timer, 6.0 timer, 9.0 timer, 9.5 last"
-    assert lines[5] == ALL_TIMER_LINE.format(threshold="307.5")
+    assert lines[4] == BLOCK_LINE.format(bar="1537.7", block_k="5.0", threshold="307.5")
+    assert lines[5] == NO_CAP_HELPS_LINE.format(timer=3, loop=3, c3=15)
+    assert lines[7] == ALL_TIMER_LINE.format(threshold="307.5")
 
 
-@pytest.mark.spec("CLI-21")
-def test_cli_21_default_out_dir_appears_on_the_manifest_line(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-22")
+def test_cli_22_default_out_dir_appears_on_the_manifest_line(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["video.mp4"], static(4))
     lines = run.out.splitlines()
     assert run.rc == 0
@@ -2030,11 +2055,11 @@ def test_cli_21_default_out_dir_appears_on_the_manifest_line(monkeypatch, capsys
     assert lines[-1] == MANIFEST_LINE.format(out_dir="video-frames")
 
 
-@pytest.mark.spec("CLI-21")
+@pytest.mark.spec("CLI-22")
 @pytest.mark.spec("MAN-7")
 @pytest.mark.spec("MAN-8")
 @pytest.mark.spec("MAN-12")
-def test_cli_21_man_7_8_12_more_than_four_sheets_get_a_warning_line(monkeypatch, capsys, tmp_path):
+def test_cli_22_man_7_8_12_more_than_four_sheets_get_a_warning_line(monkeypatch, capsys, tmp_path):
     sheets = [f"out/sheet-{i:02d}.jpg" for i in range(1, 7)]
     run = run_main(
         monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--max-gap", "1", "--rows", "1"], static(30), sheets=sheets
@@ -2062,8 +2087,8 @@ def test_cli_21_man_7_8_12_more_than_four_sheets_get_a_warning_line(monkeypatch,
     assert data["sheet"] == {"cols": 3, "rows": 1, "tile_width": 516, "sheet_width": 1568, "count": 6}
 
 
-@pytest.mark.spec("CLI-21")
-def test_cli_21_exactly_four_sheets_get_no_warning_line(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-22")
+def test_cli_22_exactly_four_sheets_get_no_warning_line(monkeypatch, capsys, tmp_path):
     sheets = [f"out/sheet-{i:02d}.jpg" for i in range(1, 5)]
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--rows", "1"], static(61), sheets=sheets)
     lines = run.out.splitlines()
@@ -2077,8 +2102,8 @@ def test_cli_21_exactly_four_sheets_get_no_warning_line(monkeypatch, capsys, tmp
     assert manifest()["sheet"]["count"] == 4
 
 
-@pytest.mark.spec("CLI-21")
-def test_cli_21_layout_line_reflects_the_flags(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-22")
+def test_cli_22_layout_line_reflects_the_flags(monkeypatch, capsys, tmp_path):
     run = run_main(
         monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--sheet-width", "1200", "--rows", "2"], static(30)
     )
@@ -2201,8 +2226,8 @@ def test_man_13_default_sample_fps_is_recorded_as_a_float(monkeypatch, capsys, t
 
 
 @pytest.mark.spec("MAN-12")
-@pytest.mark.spec("MAN-14")
-def test_man_12_14_grade_follows_orientation_and_sheet_keys_are_exact(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("MAN-15")
+def test_man_12_15_grade_follows_orientation_and_sheet_keys_are_exact(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(30), probe=(15.0, 576, 1280))
     assert run.rc == 0
     data = manifest()
@@ -2313,8 +2338,8 @@ def test_cli_15_argparse_errors_exit_two(monkeypatch, capsys, tmp_path):
 
 
 @pytest.mark.spec("MAN-1")
-@pytest.mark.spec("MAN-14")
-def test_man_1_14_manifest_has_exactly_the_top_level_keys_and_is_written_last(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("MAN-15")
+def test_man_1_15_manifest_has_exactly_the_top_level_keys_and_is_written_last(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(30), watch=str(tmp_path / "out" / "frames.json"))
     assert run.rc == 0
     assert run.watched["contact_sheets"] is False
@@ -2368,8 +2393,8 @@ def test_man_3_12_portrait_video_and_sheet_blocks(monkeypatch, capsys, tmp_path)
 @pytest.mark.spec("MAN-4")
 @pytest.mark.spec("MAN-10")
 @pytest.mark.spec("MAN-11")
-@pytest.mark.spec("MAN-14")
-def test_man_4_10_11_14_analysis_block_carries_requested_and_effective_values(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("MAN-15")
+def test_man_4_10_11_15_analysis_block_carries_requested_and_effective_values(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--max-frames", "5"], alt(20))
     assert run.rc == 0
     data = manifest()
@@ -2380,9 +2405,11 @@ def test_man_4_10_11_14_analysis_block_carries_requested_and_effective_values(mo
         "threshold": {"requested": 12.0, "effective": 307.546875},
         "max_gap": {"requested": 3.0, "effective": 3.0},
         "block_k": 5.0,
+        "block_active": False,
         "range": {"from": 0.0, "to": 15.0},
         "segment": 120.0,
         "all_timer": True,
+        "timer_share": 1.0,
     }
     assert [f["time"] for f in data["frames"]] == [0.0, 3.0, 6.0, 9.0, 9.5]
     assert [f["reason"] for f in data["frames"]] == ["first", "timer", "timer", "timer", "last"]
@@ -2622,7 +2649,8 @@ def test_man_10_block_k_is_recorded_as_a_float_as_given(monkeypatch, capsys, tmp
 
 
 @pytest.mark.spec("MAN-10")
-def test_man_10_key_order_in_analysis_and_frame_entries(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("MAN-15")
+def test_man_10_15_key_order_in_analysis_and_frame_entries(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(30))
     assert run.rc == 0
     data = manifest()
@@ -2671,7 +2699,7 @@ def test_man_11_one_block_frame_among_timers_turns_all_timer_off(monkeypatch, ca
     assert len(lines) == 7
 
 
-# -------- CLI-20, CLI-21, MAN-14 (draft, plan step 5)
+# -------- CLI-20, CLI-22, MAN-15 (plan step 5; CLI-22 and MAN-15 succeed CLI-21 and MAN-14)
 
 
 @pytest.mark.spec("CLI-20")
@@ -2715,9 +2743,9 @@ def test_cli_20_range_past_the_end_of_the_video_returns_one_after_probe(monkeypa
 
 
 @pytest.mark.spec("CLI-20")
-@pytest.mark.spec("CLI-21")
-@pytest.mark.spec("MAN-14")
-def test_cli_20_21_man_14_to_equal_to_the_duration_is_accepted(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-22")
+@pytest.mark.spec("MAN-15")
+def test_cli_20_22_man_15_to_equal_to_the_duration_is_accepted(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--to", "15"], static(30))
     lines = run.out.splitlines()
     assert run.rc == 0
@@ -2729,12 +2757,12 @@ def test_cli_20_21_man_14_to_equal_to_the_duration_is_accepted(monkeypatch, caps
     assert len(lines) == 8
     data = manifest()
     assert data["analysis"]["range"] == {"from": 0.0, "to": 15.0}
-    assert data["segments"] == [segment(1, 0.0, 15.0, [1, 2, 3, 4, 5, 6])]
+    assert data["segments"] == [manifest_segment(1, 0.0, 15.0, [1, 2, 3, 4, 5, 6])]
 
 
 @pytest.mark.spec("CLI-20")
-@pytest.mark.spec("MAN-14")
-def test_cli_20_man_14_to_below_the_duration_bounds_the_range(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("MAN-15")
+def test_cli_20_man_15_to_below_the_duration_bounds_the_range(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--to", "12"], static(24))
     assert run.rc == 0
     assert run.thumbnails_calls == [("clip.mp4", 2.0, 0.0, 12.0)]
@@ -2742,7 +2770,7 @@ def test_cli_20_man_14_to_below_the_duration_bounds_the_range(monkeypatch, capsy
     assert run.out.splitlines()[1] == "  range: 0.0-12.0 s"
     data = manifest()
     assert data["analysis"]["range"] == {"from": 0.0, "to": 12.0}
-    assert data["segments"] == [segment(1, 0.0, 12.0, [1, 2, 3, 4, 5])]
+    assert data["segments"] == [manifest_segment(1, 0.0, 12.0, [1, 2, 3, 4, 5])]
 
 
 @pytest.mark.spec("CLI-20")
@@ -2755,8 +2783,8 @@ def test_cli_20_from_zero_is_accepted_and_prints_the_range(monkeypatch, capsys, 
 
 
 @pytest.mark.spec("CLI-20")
-@pytest.mark.spec("CLI-21")
-def test_cli_20_21_default_run_passes_start_zero_no_length_and_prints_no_range_line(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-22")
+def test_cli_20_22_default_run_passes_start_zero_no_length_and_prints_no_range_line(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(30))
     lines = run.out.splitlines()
     assert run.rc == 0
@@ -2767,9 +2795,9 @@ def test_cli_20_21_default_run_passes_start_zero_no_length_and_prints_no_range_l
 
 
 @pytest.mark.spec("CLI-20")
-@pytest.mark.spec("CLI-21")
-@pytest.mark.spec("MAN-14")
-def test_cli_20_21_man_14_range_shifts_every_time_and_fills_the_segments(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-22")
+@pytest.mark.spec("MAN-15")
+def test_cli_20_22_man_15_range_shifts_every_time_and_fills_the_segments(monkeypatch, capsys, tmp_path):
     run = run_main(
         monkeypatch,
         capsys,
@@ -2805,15 +2833,16 @@ def test_cli_20_21_man_14_range_shifts_every_time_and_fills_the_segments(monkeyp
     assert data["analysis"]["segment"] == 5.0
     assert data["analysis"]["all_timer"] is True
     assert data["segments"] == [
-        segment(1, 10.0, 15.0, [1, 2]),
-        segment(2, 15.0, 20.0, [3, 4]),
-        segment(3, 20.0, 25.0, [5, 6]),
+        manifest_segment(1, 10.0, 15.0, [1, 2]),
+        manifest_segment(2, 15.0, 20.0, [3, 4]),
+        manifest_segment(3, 20.0, 25.0, [5, 6]),
     ]
+    assert all(list(e) == SEGMENT_KEYS for e in data["segments"])
 
 
 @pytest.mark.spec("CLI-20")
-@pytest.mark.spec("MAN-14")
-def test_cli_20_man_14_from_alone_runs_to_the_end_of_the_video(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("MAN-15")
+def test_cli_20_man_15_from_alone_runs_to_the_end_of_the_video(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--from", "3", "--segment", "4"], static(24))
     times = [3.0, 6.0, 9.0, 12.0, 14.5]
     lines = run.out.splitlines()
@@ -2829,14 +2858,14 @@ def test_cli_20_man_14_from_alone_runs_to_the_end_of_the_video(monkeypatch, caps
     assert data["analysis"]["range"] == {"from": 3.0, "to": 15.0}
     assert data["analysis"]["segment"] == 4.0
     assert data["segments"] == [
-        segment(1, 3.0, 7.0, [1, 2]),
-        segment(2, 7.0, 11.0, [3]),
-        segment(3, 11.0, 15.0, [4, 5]),
+        manifest_segment(1, 3.0, 7.0, [1, 2]),
+        manifest_segment(2, 7.0, 11.0, [3]),
+        manifest_segment(3, 11.0, 15.0, [4, 5]),
     ]
 
 
-@pytest.mark.spec("MAN-14")
-def test_man_14_default_range_segment_and_segments(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("MAN-15")
+def test_man_15_default_range_segment_and_segments(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(30))
     assert run.rc == 0
     data = manifest()
@@ -2848,16 +2877,19 @@ def test_man_14_default_range_segment_and_segments(monkeypatch, capsys, tmp_path
     assert isinstance(data["analysis"]["range"]["to"], float)
     assert data["analysis"]["segment"] == 120.0
     assert isinstance(data["analysis"]["segment"], float)
-    assert data["segments"] == [segment(1, 0.0, 15.0, [1, 2, 3, 4, 5, 6])]
-    assert data["segments"] == seenby.segments(STATIC_30_TIMES, 0.0, 15.0, 120.0)
+    assert data["segments"] == [manifest_segment(1, 0.0, 15.0, [1, 2, 3, 4, 5, 6])]
+    assert data["segments"] == [
+        dict(e, activity=a)
+        for e, a in zip(seenby.segments(STATIC_30_TIMES, 0.0, 15.0, 120.0), seenby.activity(static(30), 0.0, 15.0, 120.0))
+    ]
     with open(os.path.join("out", "frames.json"), encoding="utf-8") as fh:
         content = fh.read()
     assert '"from": 0.0' in content
     assert '"segment": 120.0' in content
 
 
-@pytest.mark.spec("MAN-14")
-def test_man_14_segments_follow_the_segment_flag_over_the_default_range(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("MAN-15")
+def test_man_15_segments_follow_the_segment_flag_over_the_default_range(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--segment", "5"], static(30))
     assert run.rc == 0
     assert not any(line.startswith("  range:") for line in run.out.splitlines())
@@ -2865,14 +2897,14 @@ def test_man_14_segments_follow_the_segment_flag_over_the_default_range(monkeypa
     assert data["analysis"]["range"] == {"from": 0.0, "to": 15.0}
     assert data["analysis"]["segment"] == 5.0
     assert data["segments"] == [
-        segment(1, 0.0, 5.0, [1, 2]),
-        segment(2, 5.0, 10.0, [3, 4]),
-        segment(3, 10.0, 15.0, [5, 6]),
+        manifest_segment(1, 0.0, 5.0, [1, 2]),
+        manifest_segment(2, 5.0, 10.0, [3, 4]),
+        manifest_segment(3, 10.0, 15.0, [5, 6]),
     ]
 
 
-@pytest.mark.spec("CLI-21")
-def test_cli_21_hint_lines_point_at_the_range_flags(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-22")
+def test_cli_22_hint_lines_point_at_the_range_flags(monkeypatch, capsys, tmp_path):
     sheets = [f"out/sheet-{i:02d}.jpg" for i in range(1, 7)]
     run = run_main(
         monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--max-gap", "1", "--rows", "1"], static(30), sheets=sheets
@@ -2886,8 +2918,8 @@ def test_cli_21_hint_lines_point_at_the_range_flags(monkeypatch, capsys, tmp_pat
     )
 
 
-@pytest.mark.spec("CLI-21")
-def test_cli_21_range_line_comes_second_and_shifts_the_warning_lines(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-22")
+def test_cli_22_range_line_comes_second_and_shifts_the_warning_lines(monkeypatch, capsys, tmp_path):
     sheets = [f"out/sheet-{i:02d}.jpg" for i in range(1, 7)]
     run = run_main(
         monkeypatch,
@@ -2909,8 +2941,8 @@ def test_cli_21_range_line_comes_second_and_shifts_the_warning_lines(monkeypatch
 
 
 @pytest.mark.spec("CLI-19")
-@pytest.mark.spec("CLI-21")
-def test_cli_19_21_dry_run_with_a_range_prints_five_lines(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-22")
+def test_cli_19_22_dry_run_with_a_range_prints_five_lines(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--dry-run", "--from", "3"], static(30))
     assert run.rc == 0
     assert run.out == (
@@ -2925,3 +2957,516 @@ def test_cli_19_21_dry_run_with_a_range_prints_five_lines(monkeypatch, capsys, t
     assert run.contact_sheets_calls == []
     assert run.ffmpeg_version_calls == 0
     assert not (tmp_path / "out").exists()
+
+
+# ---------------------------------------------------------------- Step 9: honest cap and budget (draft)
+
+
+def long_ramp():
+    """The step 9 `ramp`: 50 s static, then 25 thumbnails climbing by 10 grey levels (125 thumbnails, 62.0 s)."""
+    return static(100) + [flat(10 * i) for i in range(1, 26)]
+
+
+def two():
+    return static(60) + [flat(10 * i) for i in range(1, 26)] + static(60) + [flat(10 * i) for i in range(1, 26)]
+
+
+def saw():
+    return static(120) + [flat(30 * (i % 8)) for i in range(48)]
+
+
+def mixed():
+    return [flat(0), patch(100), patch(100), flat(0)]
+
+
+def reasons_at(thumbs, threshold, max_gap):
+    return [d["reason"] for d in seenby.select_frames(thumbs, threshold, max_gap)]
+
+
+def content_count(thumbs, threshold, max_gap):
+    return sum(r in ("diff", "block") for r in reasons_at(thumbs, threshold, max_gap))
+
+
+# -------- SEG-4 activity
+
+
+@pytest.mark.spec("SEG-4")
+@pytest.mark.parametrize(
+    "thumbs, start, end, length, expected",
+    [
+        (static(20), 0.0, 9.5, 120.0, [0.0]),
+        (alt(4), 0.0, 1.5, 120.0, [255.0]),
+        (mixed(), 0.0, 1.5, 120.0, [4.17]),
+        (static(20), 0.0, 9.5, 5.0, [0.0, 0.0]),
+        (long_ramp(), 0.0, 62.0, 30.0, [0.0, 3.39, 10.0]),
+        (static(3), 10.0, 11.0, 0.4, [0.0, 0.0, 0.0]),
+    ],
+    ids=["static-one-entry", "alt", "mixed", "static-two-entries", "long-ramp", "single-thumbnail-entries"],
+)
+def test_seg_4_activity_example_rows(thumbs, start, end, length, expected):
+    result = seenby.activity(thumbs, start, end, length)
+    assert result == expected
+    assert all(isinstance(value, float) for value in result)
+
+
+@pytest.mark.spec("SEG-4")
+@pytest.mark.parametrize(
+    "thumbs, start, end, length",
+    [
+        (static(20), 0.0, 9.5, 120.0),
+        (static(20), 0.0, 9.5, 5.0),
+        (long_ramp(), 0.0, 62.0, 30.0),
+        (static(3), 10.0, 11.0, 0.4),
+        ([], 0.0, 250.0, 120.0),
+        (static(30), 0.0, 15.0, 120.0),
+    ],
+)
+def test_seg_4_one_value_per_segments_entry(thumbs, start, end, length):
+    result = seenby.activity(thumbs, start, end, length)
+    assert len(result) == len(seenby.segments([], start, end, length))
+
+
+@pytest.mark.spec("SEG-4")
+def test_seg_4_thumbnail_times_start_at_the_range_start():
+    assert seenby.activity(mixed(), 10.0, 11.5, 120.0) == [4.17]
+    assert seenby.activity(alt(4), 10.0, 11.0, 0.5) == [0.0, 255.0]
+
+
+@pytest.mark.spec("SEG-4")
+def test_seg_4_sample_fps_places_the_thumbnails():
+    assert seenby.activity(alt(4), 0.0, 1.5, 0.5, 4) == [255.0, 255.0, 0.0]
+    assert seenby.activity(alt(4), 0.0, 1.5, 0.5, sample_fps=4) == [255.0, 255.0, 0.0]
+    assert seenby.activity(alt(4), 0.0, 1.5, 120.0, seenby.SAMPLE_FPS) == seenby.activity(alt(4), 0.0, 1.5, 120.0)
+
+
+@pytest.mark.spec("SEG-4")
+def test_seg_4_only_pairs_inside_one_entry_count():
+    thumbs = [flat(0), flat(0), flat(200), flat(200)]
+    assert seenby.activity(thumbs, 0.0, 1.5, 1.0) == [0.0, 0.0]
+    assert seenby.activity(thumbs, 0.0, 1.5, 120.0) == [66.67]
+
+
+# -------- CAP-8, CAP-9 second fit
+
+
+@pytest.mark.spec("CAP-8")
+def test_cap_8_gate_closed_below_51_keeps_the_first_fit():
+    times, threshold, max_gap = seenby.fit_to_cap(long_ramp(), 24, T, G)
+    assert (threshold, max_gap) == (40.5, 3.0)
+    assert len(times) == 23
+    assert times == seenby.select(long_ramp(), threshold, max_gap)
+    assert content_count(long_ramp(), 40.5, 3.0) == 4
+    assert threshold < 255 / seenby.BLOCK_K
+
+
+@pytest.mark.spec("CAP-8")
+@pytest.mark.spec("CAP-9")
+def test_cap_8_9_long_ramp_at_cap_12_takes_the_second_fit():
+    times, threshold, max_gap = seenby.fit_to_cap(long_ramp(), 12, T, G)
+    assert times == [0.0, 7.5, 15.0, 22.5, 30.0, 37.5, 45.0, 52.0, 54.5, 57.0, 59.5, 62.0]
+    assert (threshold, max_gap) == (40.5, 7.32421875)
+    assert times == seenby.select(long_ramp(), threshold, max_gap)
+    assert content_count(long_ramp(), threshold, max_gap) == 5
+
+
+@pytest.mark.spec("CAP-8")
+def test_cap_8_second_fit_gap_is_a_rung_of_the_ladder():
+    _, _, max_gap = seenby.fit_to_cap(long_ramp(), 12, T, G)
+    rung = G
+    ladder = [rung]
+    for _ in range(4):
+        rung = rung * 1.25
+        ladder.append(rung)
+    assert max_gap == ladder[-1]
+
+
+@pytest.mark.spec("CAP-8")
+@pytest.mark.spec("CAP-9")
+def test_cap_8_9_two_ramps_keep_nine_content_frames():
+    times, threshold, max_gap = seenby.fit_to_cap(two(), 24, T, G)
+    assert (threshold, max_gap) == (40.5, 4.6875)
+    assert len(times) == 23
+    assert times == seenby.select(two(), threshold, max_gap)
+    frames = seenby.select_frames(two(), threshold, max_gap)
+    assert [d["time"] for d in frames if d["reason"] == "diff"] == [32.5, 35.0, 37.5, 40.0, 42.5, 75.0, 77.5, 80.0, 82.5]
+    assert content_count(two(), threshold, max_gap) == 9
+
+
+@pytest.mark.spec("CAP-8")
+@pytest.mark.spec("CAP-9")
+def test_cap_8_9_saw_keeps_eleven_content_frames():
+    times, threshold, max_gap = seenby.fit_to_cap(saw(), 24, T, G)
+    assert (threshold, max_gap) == (91.125, 5.859375)
+    assert len(times) == 23
+    assert times == seenby.select(saw(), threshold, max_gap)
+    frames = seenby.select_frames(saw(), threshold, max_gap)
+    assert [d["time"] for d in frames if d["reason"] == "diff"] == [float(t) for t in range(62, 83, 2)]
+    assert content_count(saw(), threshold, max_gap) == 11
+
+
+@pytest.mark.spec("CAP-9")
+def test_cap_9_second_fit_without_more_content_is_discarded():
+    thumbs = static(200) + [flat(40 * (i % 6)) for i in range(60)]
+    times, threshold, max_gap = seenby.fit_to_cap(thumbs, 24, T, G)
+    assert (threshold, max_gap) == (205.03125, 5.859375)
+    assert len(times) == 23
+    assert times == seenby.select(thumbs, threshold, max_gap)
+    assert content_count(thumbs, threshold, max_gap) == 0
+
+
+@pytest.mark.spec("CAP-9")
+def test_cap_9_open_gate_with_no_content_keeps_the_cap_4_row():
+    assert seenby.fit_to_cap(alt(20), 5, T, G) == ([0.0, 3.0, 6.0, 9.0, 9.5], 307.546875, 3.0)
+    assert 307.546875 >= 255 / seenby.BLOCK_K
+
+
+@pytest.mark.spec("CAP-9")
+@pytest.mark.parametrize(
+    "thumbs, max_frames, block_k, expected",
+    [
+        (static(240), 24, 5.0, ([0.0] + [float(t) for t in range(6, 115, 6)] + [119.5], 12.0, 5.859375)),
+        (alt(20), 8, 5.0, ([0.0, 3.0, 6.0, 9.0, 9.5], 307.546875, 3.0)),
+        (alt(20), 2, 5.0, ([0.0, 9.5], 307.546875, 9.1552734375)),
+        (blocky(), 5, 5.0, ([0.0, 3.0, 6.0, 9.0, 9.5], 27.0, 3.0)),
+        (blocky(), 5, 0, ([0.0, 3.0, 6.0, 9.0, 9.5], 12.0, 3.0)),
+        (blocky(), 24, 5.0, ([i / 2 for i in range(20)], 12.0, 3.0)),
+        (blocky(), 2, 0.5, ([0.0, 9.5], 205.03125, 9.1552734375)),
+    ],
+    ids=["static240-cap24", "alt20-cap8", "alt20-cap2", "blocky-cap5", "blocky-cap5-k0", "blocky-cap24", "blocky-cap2-k0.5"],
+)
+def test_cap_9_earlier_rows_are_unchanged_by_the_second_fit(thumbs, max_frames, block_k, expected):
+    assert seenby.fit_to_cap(thumbs, max_frames, T, G, block_k) == expected
+
+
+@pytest.mark.spec("CAP-8")
+@pytest.mark.spec("CAP-9")
+@pytest.mark.parametrize("cap", [2, 3, 6, 12, 24])
+def test_cap_8_9_second_fit_still_fits_the_cap_and_matches_select(cap):
+    for thumbs in (long_ramp(), two(), saw()):
+        times, threshold, max_gap = seenby.fit_to_cap(thumbs, cap, T, G)
+        assert len(times) <= cap
+        assert threshold >= T
+        assert max_gap >= G
+        assert times == seenby.select(thumbs, threshold, max_gap)
+        assert times[0] == 0.0
+        assert times[-1] == last_time(thumbs)
+
+
+# -------- MAN-15
+
+
+@pytest.mark.spec("MAN-15")
+def test_man_15_static_run_analysis_keys_and_segment_activity(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(30))
+    assert run.rc == 0
+    data = manifest()
+    assert list(data["analysis"]) == ANALYSIS_KEYS
+    assert data["analysis"]["block_active"] is True
+    assert data["analysis"]["timer_share"] == 1.0
+    assert data["segments"] == [
+        {"n": 1, "from": 0.0, "to": 15.0, "frames": [1, 2, 3, 4, 5, 6], "activity": 0.0}
+    ]
+    assert list(data["segments"][0]) == SEGMENT_KEYS
+
+
+@pytest.mark.spec("MAN-15")
+def test_man_15_high_threshold_turns_block_active_off_and_reports_activity(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--threshold", "300", "--max-gap", "7"], alt(30))
+    assert run.rc == 0
+    data = manifest()
+    assert list(data["analysis"]) == ANALYSIS_KEYS
+    assert data["analysis"]["block_active"] is False
+    assert data["analysis"]["timer_share"] == 1.0
+    assert data["segments"][0]["activity"] == 255.0
+    assert data["segments"] == [manifest_segment(1, 0.0, 15.0, [1, 2, 3, 4], 255.0)]
+
+
+@pytest.mark.spec("MAN-15")
+def test_man_15_diff_frames_give_timer_share_zero(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], ramp())
+    assert run.rc == 0
+    data = manifest()
+    assert [f["reason"] for f in data["frames"]] == ["first", "diff", "diff", "diff"]
+    assert list(data["analysis"]) == ANALYSIS_KEYS
+    assert data["analysis"]["timer_share"] == 0.0
+    assert data["analysis"]["block_active"] is True
+
+
+@pytest.mark.spec("MAN-15")
+def test_man_15_range_run_has_activity_in_every_segment(monkeypatch, capsys, tmp_path):
+    run = run_main(
+        monkeypatch,
+        capsys,
+        tmp_path,
+        ["clip.mp4", "out", "--from", "10", "--to", "25", "--segment", "5"],
+        static(30),
+        probe=(60.0, 800, 600),
+    )
+    assert run.rc == 0
+    data = manifest()
+    assert len(data["segments"]) == 3
+    assert all(list(e) == SEGMENT_KEYS for e in data["segments"])
+    assert [e["activity"] for e in data["segments"]] == [0.0, 0.0, 0.0]
+    assert data["analysis"]["range"] == {"from": 10.0, "to": 25.0}
+    assert data["analysis"]["segment"] == 5.0
+
+
+@pytest.mark.spec("MAN-15")
+@pytest.mark.parametrize(
+    "thumbs, reasons, timer_share",
+    [
+        (static(1), ["first"], 0.0),
+        (static(4), ["first", "last"], 0.0),
+        (static(7), ["first", "timer"], 1.0),
+        (static(6) + [flat(255)] * 13, ["first", "diff", "timer", "timer"], 0.67),
+        (static(11) + [patch(100)] + static(18), ["first", "timer", "block", "block", "timer", "timer", "last"], 0.6),
+    ],
+    ids=["first-only", "first-last", "one-timer", "two-of-three", "three-of-five"],
+)
+def test_man_15_timer_share_counts_timer_over_loop_reasons(monkeypatch, capsys, tmp_path, thumbs, reasons, timer_share):
+    frames = ["out/frame-01.jpg"] if len(reasons) == 1 else None
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], thumbs, frames=frames)
+    assert run.rc == 0
+    data = manifest()
+    assert [f["reason"] for f in data["frames"]] == reasons
+    assert list(data["analysis"]) == ANALYSIS_KEYS
+    assert data["analysis"]["timer_share"] == timer_share
+    assert isinstance(data["analysis"]["timer_share"], float)
+
+
+@pytest.mark.spec("MAN-15")
+@pytest.mark.parametrize(
+    "argv, block_active",
+    [
+        (["clip.mp4", "out"], True),
+        (["clip.mp4", "out", "--block-k", "0"], False),
+        (["clip.mp4", "out", "--threshold", "50.9"], True),
+        (["clip.mp4", "out", "--threshold", "51"], False),
+        (["clip.mp4", "out", "--block-k", "2", "--threshold", "127"], True),
+        (["clip.mp4", "out", "--block-k", "2", "--threshold", "127.5"], False),
+    ],
+    ids=["default", "k0", "bar-254.5", "bar-255", "k2-bar-254", "k2-bar-255"],
+)
+def test_man_15_block_active_is_the_bar_under_255(monkeypatch, capsys, tmp_path, argv, block_active):
+    run = run_main(monkeypatch, capsys, tmp_path, argv, static(30))
+    assert run.rc == 0
+    data = manifest()
+    assert list(data["analysis"]) == ANALYSIS_KEYS
+    assert data["analysis"]["block_active"] is block_active
+
+
+@pytest.mark.spec("MAN-15")
+def test_man_15_block_active_uses_the_effective_threshold(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], alt(30))
+    assert run.rc == 0
+    data = manifest()
+    assert data["analysis"]["threshold"] == {"requested": 12.0, "effective": 307.546875}
+    assert list(data["analysis"]) == ANALYSIS_KEYS
+    assert data["analysis"]["block_active"] is False
+    assert data["analysis"]["timer_share"] == 1.0
+
+
+@pytest.mark.spec("MAN-15")
+def test_man_15_segment_activity_is_computed_over_the_analysed_thumbnails(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--segment", "5"], mixed() * 8, probe=(16.0, 800, 600))
+    assert run.rc == 0
+    data = manifest()
+    assert [(e["from"], e["to"]) for e in data["segments"]] == [(0.0, 5.0), (5.0, 10.0), (10.0, 15.0), (15.0, 16.0)]
+    assert all(list(e) == SEGMENT_KEYS for e in data["segments"])
+    assert [e["activity"] for e in data["segments"]] == seenby.activity(mixed() * 8, 0.0, 16.0, 5.0)
+    assert data["segments"][3]["activity"] == 6.25
+
+
+# -------- CLI-22
+
+
+LONG_RAMP_FRAMES_LINE = (
+    "  frames: 0.0 first, "
+    + ", ".join("%.1f timer" % t for t in range(3, 52, 3))
+    + ", 53.5 diff, 56.0 diff, 58.5 diff, 61.0 diff, 62.0 last"
+)
+LONG_RAMP_TIMER_LINE = BIGGER_CAP_LINE.format(timer=17, loop=21, c2=48, n2=12, t2="12.0", s2=4, c3=72, n3=12, t3="12.0", s3=4)
+LONG_RAMP_DRY_RUN_STDOUT = (
+    "clip.mp4: 65.0 s, 800x600, landscape\n"
+    "  125 thumbnails, selected 23/24 (threshold 12.0 -> 40.5, max gap 3.0 -> 3.0 s)\n"
+    + LONG_RAMP_FRAMES_LINE + "\n"
+    "  layout: window, tile 516 px, 3x3 per sheet\n"
+    + LONG_RAMP_TIMER_LINE + "\n"
+)
+ALT_30_TIMER_LINE = BIGGER_CAP_LINE.format(timer=4, loop=4, c2=48, n2=29, t2="12.0", s2=4, c3=72, n3=29, t3="12.0", s3=4)
+
+
+@pytest.mark.spec("CLI-22")
+def test_cli_22_static_run_prints_the_cli_21_lines_unchanged(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(30))
+    assert run.rc == 0
+    assert run.out == STATIC_30_STDOUT
+    assert "block rule" not in run.out
+    assert "frames by the timer;" not in run.out
+
+
+@pytest.mark.spec("CLI-22")
+def test_cli_22_block_line_after_the_layout_line_when_the_bar_is_above_255(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--threshold", "300", "--max-gap", "7"], alt(30))
+    assert run.rc == 0
+    assert run.out == (
+        "clip.mp4: 15.0 s, 800x600, landscape\n"
+        "  30 thumbnails, selected 4/24 (threshold 300.0 -> 300.0, max gap 7.0 -> 7.0 s)\n"
+        "  frames: 0.0 first, 7.0 timer, 14.0 timer, 14.5 last\n"
+        "  layout: window, tile 516 px, 3x3 per sheet\n"
+        "  block rule inactive: bar 1500.0 (5.0 x 300.0) is at or above 255\n"
+        "  contact sheets: out/sheet-01.jpg\n"
+        + MANIFEST_LINE.format(out_dir="out") + "\n"
+    )
+
+
+@pytest.mark.spec("CLI-22")
+def test_cli_22_block_line_prints_under_dry_run(monkeypatch, capsys, tmp_path):
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--threshold", "300", "--max-gap", "7", "--dry-run"], alt(30)
+    )
+    assert run.rc == 0
+    assert run.out == (
+        "clip.mp4: 15.0 s, 800x600, landscape\n"
+        "  30 thumbnails, selected 4/24 (threshold 300.0 -> 300.0, max gap 7.0 -> 7.0 s)\n"
+        "  frames: 0.0 first, 7.0 timer, 14.0 timer, 14.5 last\n"
+        "  layout: window, tile 516 px, 3x3 per sheet\n"
+        "  block rule inactive: bar 1500.0 (5.0 x 300.0) is at or above 255\n"
+    )
+    assert run.save_frames_calls == []
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.spec("CLI-22")
+def test_cli_22_block_line_at_the_boundary_bar_of_255(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--threshold", "51"], static(30))
+    assert run.rc == 0
+    assert run.out.splitlines()[4] == BLOCK_LINE.format(bar="255.0", block_k="5.0", threshold="51.0")
+    below = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out2", "--threshold", "50.9"], static(30))
+    assert below.rc == 0
+    assert "block rule" not in below.out
+
+
+@pytest.mark.spec("CLI-22")
+@pytest.mark.spec("MAN-15")
+def test_cli_22_man_15_long_ramp_names_what_a_bigger_cap_buys(monkeypatch, capsys, tmp_path):
+    sheets = [f"out/sheet-{i:02d}.jpg" for i in range(1, 4)]
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], long_ramp(), probe=(65.0, 800, 600), sheets=sheets)
+    assert run.rc == 0
+    assert run.err == ""
+    assert run.out == (
+        LONG_RAMP_DRY_RUN_STDOUT
+        + "  contact sheets: " + ", ".join(sheets) + "\n"
+        + MANIFEST_LINE.format(out_dir="out") + "\n"
+    )
+    assert run.out.splitlines()[4] == LONG_RAMP_TIMER_LINE
+    assert len(run.save_frames_calls[0][1]) == 23
+    data = manifest()
+    reasons = [f["reason"] for f in data["frames"]]
+    assert reasons.count("timer") == 17
+    assert reasons.count("diff") == 4
+    assert data["analysis"]["threshold"] == {"requested": 12.0, "effective": 40.5}
+    assert data["analysis"]["timer_share"] == 0.81
+    assert data["analysis"]["block_active"] is True
+    assert data["analysis"]["all_timer"] is False
+    assert data["sheets"] == [
+        {"file": "sheet-01.jpg", "frames": [1, 9]},
+        {"file": "sheet-02.jpg", "frames": [10, 18]},
+        {"file": "sheet-03.jpg", "frames": [19, 23]},
+    ]
+    assert data["segments"] == [manifest_segment(1, 0.0, 65.0, list(range(1, 24)), 2.02)]
+
+
+@pytest.mark.spec("CLI-22")
+@pytest.mark.spec("CLI-19")
+def test_cli_22_19_timer_line_prints_under_dry_run_after_the_layout_line(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--dry-run"], long_ramp(), probe=(65.0, 800, 600))
+    assert run.rc == 0
+    assert run.out == LONG_RAMP_DRY_RUN_STDOUT
+    assert run.save_frames_calls == []
+    assert run.contact_sheets_calls == []
+    assert run.ffmpeg_version_calls == 0
+    assert not (tmp_path / "out").exists()
+    assert os.listdir(tmp_path) == ["clip.mp4"]
+
+
+@pytest.mark.spec("CLI-22")
+def test_cli_22_static_long_recording_says_no_cap_adds_content(monkeypatch, capsys, tmp_path):
+    sheets = [f"out/sheet-{i:02d}.jpg" for i in range(1, 4)]
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(240), probe=(125.0, 800, 600), sheets=sheets)
+    assert run.rc == 0
+    assert run.out == (
+        "clip.mp4: 125.0 s, 800x600, landscape\n"
+        "  240 thumbnails, selected 21/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 5.9 s)\n"
+        "  frames: 0.0 first, " + ", ".join("%.1f timer" % t for t in range(6, 115, 6)) + ", 119.5 last\n"
+        "  layout: window, tile 516 px, 3x3 per sheet\n"
+        + NO_CAP_HELPS_LINE.format(timer=19, loop=19, c3=72) + "\n"
+        + "  contact sheets: " + ", ".join(sheets) + "\n"
+        + ALL_TIMER_LINE.format(threshold="12.0") + "\n"
+        + MANIFEST_LINE.format(out_dir="out") + "\n"
+    )
+    data = manifest()
+    assert data["analysis"]["max_gap"] == {"requested": 3.0, "effective": 5.859375}
+    assert data["analysis"]["timer_share"] == 1.0
+    assert data["analysis"]["all_timer"] is True
+
+
+@pytest.mark.spec("CLI-22")
+@pytest.mark.spec("MAN-15")
+def test_cli_22_man_15_alternating_input_prints_both_lines(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], alt(30))
+    assert run.rc == 0
+    assert run.out == (
+        "clip.mp4: 15.0 s, 800x600, landscape\n"
+        "  30 thumbnails, selected 6/24 (threshold 12.0 -> 307.5, max gap 3.0 -> 3.0 s)\n"
+        "  frames: 0.0 first, 3.0 timer, 6.0 timer, 9.0 timer, 12.0 timer, 14.5 last\n"
+        "  layout: window, tile 516 px, 3x3 per sheet\n"
+        "  block rule inactive: bar 1537.7 (5.0 x 307.5) is at or above 255\n"
+        + ALT_30_TIMER_LINE + "\n"
+        + "  contact sheets: out/sheet-01.jpg\n"
+        + ALL_TIMER_LINE.format(threshold="307.5") + "\n"
+        + MANIFEST_LINE.format(out_dir="out") + "\n"
+    )
+    data = manifest()
+    assert data["analysis"]["timer_share"] == 1.0
+    assert data["analysis"]["block_active"] is False
+
+
+@pytest.mark.spec("CLI-22")
+def test_cli_22_block_k_zero_drops_the_block_line_only(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--block-k", "0"], alt(30))
+    assert run.rc == 0
+    assert run.out == (
+        "clip.mp4: 15.0 s, 800x600, landscape\n"
+        "  30 thumbnails, selected 6/24 (threshold 12.0 -> 307.5, max gap 3.0 -> 3.0 s)\n"
+        "  frames: 0.0 first, 3.0 timer, 6.0 timer, 9.0 timer, 12.0 timer, 14.5 last\n"
+        "  layout: window, tile 516 px, 3x3 per sheet\n"
+        + ALT_30_TIMER_LINE + "\n"
+        + "  contact sheets: out/sheet-01.jpg\n"
+        + ALL_TIMER_LINE.format(threshold="307.5") + "\n"
+        + MANIFEST_LINE.format(out_dir="out") + "\n"
+    )
+    assert manifest()["analysis"]["block_active"] is False
+
+
+@pytest.mark.spec("CLI-22")
+def test_cli_22_no_timer_line_under_five_frames(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--max-frames", "2"], alt(20))
+    lines = run.out.splitlines()
+    assert run.rc == 0
+    assert lines[1] == "  20 thumbnails, selected 2/2 (threshold 12.0 -> 307.5, max gap 3.0 -> 9.2 s)"
+    assert lines[4] == BLOCK_LINE.format(bar="1537.7", block_k="5.0", threshold="307.5")
+    assert lines[5] == "  contact sheets: out/sheet-01.jpg"
+    assert len(lines) == 7
+    assert "frames by the timer;" not in run.out
+
+
+@pytest.mark.spec("CLI-22")
+def test_cli_22_no_timer_line_when_the_cap_was_not_active(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(61), sheets=["out/sheet-01.jpg", "out/sheet-02.jpg"])
+    assert run.rc == 0
+    assert "frames by the timer;" not in run.out
+    assert len(run.out.splitlines()) == 7
+    data = manifest()
+    assert list(data["analysis"]) == ANALYSIS_KEYS
+    assert data["analysis"]["timer_share"] == 1.0

@@ -1,10 +1,11 @@
 # seenby
 
-Status anchored for SEL-1..6, CAP-1..7, CLN-1, CLN-3..4, ENV-1..2, CLI-1, CLI-3..4, CLI-6..7, CLI-9..13,
-CLI-15..17, CLI-19..21, REC-2..9, PRB-1..3, TOOL-1..3, DIR-1..2, JSN-1..3, MAN-1..4, MAN-7..14, BLK-1..2, LAY-1..6,
-SEG-1..3, FF-1..7 (code exists, tests green). Removed: CLN-2, CLI-2, CLI-5, CLI-8, CLI-14, CLI-18, REC-1, MAN-5,
-MAN-6 (each names its successor). Sections keep the heading of the step that introduced them so the IDs stay
-where they were born. Tests `tests/test_seenby.py`. Public surface: `docs/specs/api/seenby.txt`.
+Status anchored for SEL-1..6, CAP-1..9, CLN-1, CLN-3..4, ENV-1..2, CLI-1, CLI-3..4, CLI-6..7, CLI-9..13,
+CLI-15..17, CLI-19..20, CLI-22, REC-2..9, PRB-1..3, TOOL-1..3, DIR-1..2, JSN-1..3, MAN-1..4, MAN-7..13, MAN-15,
+BLK-1..2, LAY-1..6, SEG-1..4, FF-1..7 (code exists, tests green). Removed: CLN-2, CLI-2, CLI-5, CLI-8, CLI-14,
+CLI-18, CLI-21, REC-1, MAN-5, MAN-6, MAN-14 (each names its successor). Sections keep the heading of the step that
+introduced them so the IDs stay where they were born. Tests `tests/test_seenby.py`. Public surface:
+`docs/specs/api/seenby.txt`.
 
 ## Purpose
 
@@ -822,29 +823,11 @@ CLI-20 Options `--from` (float seconds, default 0.0, 0 or above), `--to` (float 
        Why. `-ss` before `-i` is exact and costs nothing on ffmpeg 6; shifting after selection keeps SEL and
        CAP rules untouched.
 
-CLI-21 On success stdout is these lines, in this order (replaces CLI-18):
-
-           <basename of video>: <duration %.1f> s, <width>x<height>, <portrait|landscape>
-             range: <from %.1f>-<to %.1f> s
-             <n> thumbnails, selected <k>/<max_frames> (threshold <requested %.1f> -> <effective %.1f>, max gap <requested %.1f> -> <effective %.1f> s)
-             frames: <time %.1f> <reason>, ...
-             layout: <grade>, tile <tile> px, <cols>x<rows> per sheet
-             contact sheets: <paths joined by ", ">           (or the single frame path, CLI-7)
-             <sheets> contact sheets are more than 4; consider --max-frames or --from/--to
-             all frames taken by the timer: the threshold contributed nothing (effective <effective threshold %.1f>); try --max-frames, --block-k or --from/--to
-             manifest: <out_dir>/frames.json. Sheets are for meaning; read digits from the native frame, see "recheck" in the manifest.
-
-       The "range" line appears only when `--from` or `--to` was given (`to` printed as the analysed end). The
-       "more than 4" and "all frames" lines as before, with the new hint texts. `--dry-run` prints the first
-       five lines (four without a range line). Lines after the first start with two spaces. Return 0.
+CLI-21 removed, superseded by CLI-22 (two honest lines about the cap and the block rule).
 
 ### frames.json, amended
 
-MAN-14 `analysis` gains, after `block_k` and before `all_timer`: `"range": {"from": <start>, "to": <analysed
-       end>}` (floats; `0.0` and the duration by default) and `"segment": <--segment as float>`. A new top-level
-       key `segments` comes after `sheets` and holds `segments(<frame times>, from, to, segment)`, so the
-       top-level keys are exactly `tool`, `version`, `ffmpeg`, `video`, `analysis`, `sheet`, `frames`, `sheets`,
-       `segments`. Frame `time` values in `frames` are the shifted, absolute times.
+MAN-14 removed, superseded by MAN-15 (`block_active`, `timer_share`, `segments[].activity`).
 
 ### ffmpeg stages, amended
 
@@ -892,3 +875,137 @@ SEG-P1  For `start` a float in `[0.0, 1000.0]`, `span` in `[0.5, 3000.0]` (`end 
 - `segments`: undefined when `end <= start` or `length <= 0`; do not test. Times outside `[start, end]` fall
   into the first or last entry (SEG-2).
 - `main`: the new argparse checks exit 2; the two past-the-end checks return 1 (CLI-20). Nothing else new raises.
+
+## Step 9: honest cap and budget (drafted and implemented 2026-09-17)
+
+Anchored since 2026-09-17. Written as a draft before the code existed; the tester wrote red tests from it.
+
+Why. A third real run (a 100 s smooth scroll) showed that under the cap the timer frames crowd out content and
+the block rule goes dead above threshold 51 without a word, and that raising `--max-frames` only adds timer
+frames. Part A makes the output say so with numbers. Part B reserves half the cap for content when the first
+fit degenerated, measured on two long concatenations (content frames 3 -> 14 and 0 -> 18 at the default cap)
+with the ten short recordings unchanged at caps 24 and 12.
+
+### Public surface added or changed
+
+    def activity(thumbs, start, end, length, sample_fps=SAMPLE_FPS)
+
+`fit_to_cap`, `select_frames`, `select`, `segments` keep their signatures. `block_max` may be skipped for
+thumbnails the diff rule already kept or the block rule cannot keep; kept entries still report it (REC-7).
+
+### Part A: activity, timer share, honest lines
+
+SEG-4  `activity(thumbs, start, end, length, sample_fps)` returns one float per `segments` entry (same count and
+       order as `segments(times, start, end, length)`): the mean of the differences between consecutive
+       thumbnails whose times both fall in the entry (thumbnail `i` at `start + i / sample_fps`; the entry
+       covers `from <= t < to`, the last entry also `t == end`), rounded to 2 decimals; `0.0` when the entry
+       holds fewer than two thumbnails. The difference is the SEL-3 mean (0..255).
+       Why. A reader of a long recording needs to know where the picture moved before deciding where to zoom
+       with `--from/--to`; the thumbnails are already computed, this costs one pass.
+
+MAN-15 (replaces MAN-14) `analysis` keys are exactly, in order: `sample_fps`, `thumbnails`, `max_frames`,
+       `threshold`, `max_gap`, `block_k`, `block_active`, `range`, `segment`, `all_timer`, `timer_share`, where
+       `block_active` is `block_k > 0 and block_k * effective_threshold < 255` (the block rule can still fire)
+       and `timer_share` is the number of frames with reason `timer` divided by the number with reason `diff`,
+       `block` or `timer`, rounded to 2 decimals, `0.0` when that number is 0 (`first` and `last` never count).
+       `segments[k]` gains `"activity": <activity(...)[k]>` after `frames`, so each entry's keys are exactly
+       `n`, `from`, `to`, `frames`, `activity`, computed over the analysed thumbnails with `start` the range
+       start, `end` the analysed end and `length` `--segment`. `range` and `segment` as MAN-14 said.
+
+CLI-22 (replaces CLI-21) On success stdout is these lines, in this order:
+
+           <basename of video>: <duration %.1f> s, <width>x<height>, <portrait|landscape>
+             range: <from %.1f>-<to %.1f> s                                          (only when --from or --to was given)
+             <n> thumbnails, selected <k>/<max_frames> (threshold <requested %.1f> -> <effective %.1f>, max gap <requested %.1f> -> <effective %.1f> s)
+             frames: <time %.1f> <reason>, ...
+             layout: <grade>, tile <tile> px, <cols>x<rows> per sheet
+             block rule inactive: bar <block_k * threshold %.1f> (<block_k %.1f> x <threshold %.1f>) is at or above 255   (only when block_k > 0 and not block_active)
+             <timer> of <loop> frames by the timer; --max-frames <2c>: <content> content frames at threshold <t %.1f> (<sheets> sheets); --max-frames <3c>: <content> content frames at threshold <t %.1f> (<sheets> sheets)   (see below)
+             <timer> of <loop> frames by the timer; no cap up to <3c> adds a content frame, the recording changes slowly or not at all   (see below)
+             contact sheets: <paths joined by ", ">           (or the single frame path, CLI-7)
+             <sheets> contact sheets are more than 4; consider --max-frames or --from/--to
+             all frames taken by the timer: the threshold contributed nothing (effective <effective threshold %.1f>); try --max-frames, --block-k or --from/--to
+             manifest: <out_dir>/frames.json. Sheets are for meaning; read digits from the native frame, see "recheck" in the manifest.
+
+       The "by the timer" line, one of its two forms, appears only when the cap was active (effective threshold
+       above the requested one or effective gap above the requested one), the selection has at least 5 frames
+       (`len(times) >= 5`, the MAN-11 convention), and `timer_share > 0.7` (strict). At a bar of exactly 255
+       (`--threshold 51`) the rule cannot fire (`block > 255` is impossible), so `block_active` is false and the
+       block line prints "is at or above 255". `<timer>` is the count of timer frames, `<loop>` the count of frames
+       with reason `diff`, `block` or `timer`. `<2c>` and `<3c>` are `2 * max_frames` and `3 * max_frames`; each
+       alternative is `fit_to_cap` on the same thumbnails with that cap and the requested threshold and gap,
+       `<content>` its count of `diff` and `block` frames, `<t>` its effective threshold, `<sheets>`
+       `layout(width, height, <its frame count>, sheet_width, rows, tile_width)[4]`. The second form is used
+       when neither alternative has more content frames than the selection. Both lines also print under
+       `--dry-run`, after the layout line; nothing else about `--dry-run` changes (CLI-19). The block line
+       prints under `--dry-run` too. The other lines as in CLI-21.
+       Why. The reader must learn from the console, not from a source file, that the cap or the block rule was
+       binding, and what a rerun would buy; the alternatives are computed on thumbnails already in memory and
+       only when the line fires.
+
+### Part B: a second fit when the first degenerated
+
+CAP-8  When the CAP-4 threshold of the first fit is at or above `255 / BLOCK_K` (51.0, where the block rule at
+       the default factor cannot fire), a second fit is run: the gap ladder starts at `max_gap` and each rung
+       is the previous times 1.25, extended until `select(thumbs, 256.0, rung, 0, sample_fps)` has at most
+       `max(2, max_frames // 2)` entries; at the top rung the threshold is raised as in CAP-4 (starting again
+       from the requested threshold); then, while the ladder has more than one rung and the selection at the
+       rung below the top, with that threshold, has at most `max_frames` entries, the top rung is dropped. The
+       second fit's result is `select` at the final rung and threshold. The gate compares with the constant
+       `BLOCK_K`, not `block_k`, so `--block-k 0` gates the same way.
+       Why. Timer frames that fill the cap leave no room for content; reserving half the cap for content and
+       giving unused slots back to the timer keeps 14-18 content frames on ten-minute recordings where the
+       first fit keeps 0-3. Half was measured against 1/3 and 2/3.
+
+CAP-9  The second fit replaces the first only when it keeps strictly more frames with reason `diff` or `block`.
+       Otherwise the first fit's `times`, `threshold` and `max_gap` are returned. CAP-1..7 and their rows stay
+       true: on their inputs the gate is closed or the second fit is discarded.
+       Why. The walk-down can be blocked by a jump in the count and return fewer frames with no more content.
+
+Termination. First fit as today. Second fit: the forced-only count tends to 2 as the rung outgrows the
+recording and the budget is at least 2, so the ladder is finite; the threshold loop ends as in CAP-4; the
+walk-down pops at most `len(ladder) - 1` times. CAP-P1, CAP-P2, CAP-P3 hold for both fits. Monotonicity in
+`max_frames` is not promised.
+
+### Examples (step 9)
+
+`ramp` here is the long ramp `static(100) + [flat(10 * i) for i in range(1, 26)]` (125 thumbnails, 62.0 s), not the
+REC-3 ramp of 10 (called `ramp10` in the MAN-15 row); `two` is
+`static(60) + [flat(10 * i) for i in range(1, 26)] + static(60) + [flat(10 * i) for i in range(1, 26)]` (84.5 s);
+`saw` is `static(120) + [flat(30 * (i % 8)) for i in range(48)]` (83.5 s); `mixed` is
+`[flat(0), patch(100), patch(100), flat(0)]`. For `main()` rows the fakes are as before; `probe` returns
+`(15.0, 800, 600)` unless said otherwise.
+
+| ID | Input | Result |
+|---|---|---|
+| SEG-4 | `activity(static(20), 0.0, 9.5, 120.0)` | `[0.0]` |
+| SEG-4 | `activity(alt(4), 0.0, 1.5, 120.0)` | `[255.0]` |
+| SEG-4 | `activity(mixed, 0.0, 1.5, 120.0)` | `[4.17]` (differences 6.25, 0.0, 6.25) |
+| SEG-4 | `activity(static(20), 0.0, 9.5, 5.0)` | `[0.0, 0.0]` |
+| SEG-4 | `activity(ramp, 0.0, 62.0, 30.0)` | `[0.0, 3.39, 10.0]` |
+| SEG-4 | `activity(static(3), 10.0, 11.0, 0.4)` | `[0.0, 0.0, 0.0]` (entries with fewer than two thumbnails) |
+| MAN-15 | argv `['clip.mp4', 'out']`, thumbnails `static(30)` | `analysis` keys exactly the MAN-15 list; `block_active` true; `timer_share` 1.0; `segments` `[{"n": 1, "from": 0.0, "to": 15.0, "frames": [1, 2, 3, 4, 5, 6], "activity": 0.0}]` |
+| MAN-15 | argv `['clip.mp4', 'out', '--threshold', '300', '--max-gap', '7']`, thumbnails `alt(30)` | `block_active` false (5 x 300 = 1500); `timer_share` 1.0; `segments[0].activity` 255.0 |
+| MAN-15 | argv `['clip.mp4', 'out']`, thumbnails `ramp10` (the REC-3 ramp of 10) | `timer_share` 0.0; `block_active` true |
+| MAN-15 | argv `['clip.mp4', 'out', '--from', '10', '--to', '25', '--segment', '5']`, probe `(60.0, 800, 600)`, thumbnails `static(30)` | three segments, each with `"activity": 0.0` after `frames` |
+| CLI-22 | argv `['clip.mp4', 'out']`, thumbnails `static(30)` | stdout exactly the CLI-21 static(30) row (cap inactive, no "by the timer" line; block active, no block line) |
+| CLI-22 | argv `['clip.mp4', 'out', '--threshold', '300', '--max-gap', '7']`, thumbnails `alt(30)` | after the layout line: `  block rule inactive: bar 1500.0 (5.0 x 300.0) is at or above 255`; no "by the timer" line (cap inactive) |
+| CLI-22 | argv `['clip.mp4', 'out']`, probe `(65.0, 800, 600)`, thumbnails `ramp`, fake `contact_sheets` returns 3 paths | selection 23 frames, threshold 12.0 -> 40.5, 17 timer, 4 diff; after the layout line: `  17 of 21 frames by the timer; --max-frames 48: 12 content frames at threshold 12.0 (4 sheets); --max-frames 72: 12 content frames at threshold 12.0 (4 sheets)`; `timer_share` 0.81; no block line (bar 202.5) |
+| CLI-22 | argv `['clip.mp4', 'out', '--dry-run']`, probe `(65.0, 800, 600)`, thumbnails `ramp` | return 0; stdout is the first four lines then the same "17 of 21 frames by the timer; ..." line; nothing written |
+| CLI-22 | argv `['clip.mp4', 'out']`, probe `(125.0, 800, 600)`, thumbnails `static(240)`, fake `contact_sheets` returns 3 paths (21 frames on 3x3) | 21 frames, gap 3.0 -> 5.859375 (cap active); after the layout line `  19 of 19 frames by the timer; no cap up to 72 adds a content frame, the recording changes slowly or not at all`; the "all frames taken by the timer" line also prints (all_timer true) |
+| CLI-22 | argv `['clip.mp4', 'out']`, thumbnails `alt(30)` (default cap; every thumbnail differs, 30 > 24, the threshold climbs to 307.546875) | 6 frames `0.0 first, 3.0 timer, 6.0 timer, 9.0 timer, 12.0 timer, 14.5 last`, `timer_share` 1.0 (4 of 4), `block_active` false; after the layout line: `  block rule inactive: bar 1537.7 (5.0 x 307.5) is at or above 255` then `  4 of 4 frames by the timer; --max-frames 48: 29 content frames at threshold 12.0 (4 sheets); --max-frames 72: 29 content frames at threshold 12.0 (4 sheets)` (at those caps all 30 thumbnails fit, 29 with reason diff, and layout(800, 600, 30) gives 4 sheets) |
+| CLI-22 | the same with `--block-k 0` | no block line; the same "4 of 4 frames by the timer" line |
+| CAP-8 gate closed | `fit_to_cap(ramp, 24, T, G)` | `(..., 40.5, 3.0)`, 23 entries, of which 4 have reason diff in `select_frames(ramp, 40.5, 3.0)`; the first fit's threshold 40.5 is under 51 |
+| CAP-8, CAP-9 | `fit_to_cap(ramp, 12, T, G)` | `([0.0, 7.5, 15.0, 22.5, 30.0, 37.5, 45.0, 52.0, 54.5, 57.0, 59.5, 62.0], 40.5, 7.32421875)`, 5 diff. First fit `(91.125, 5.859375)` with 1 diff; second fit: budget 6, ladder to 14.30511474609375, thresholds 12 -> 18 -> 27 -> 40.5, walk-down to 7.32421875 |
+| CAP-8, CAP-9 | `fit_to_cap(two, 24, T, G)` | `(..., 40.5, 4.6875)`, 23 entries, 9 diff at 32.5, 35.0, 37.5, 40.0, 42.5, 75.0, 77.5, 80.0, 82.5; first fit `(60.75, 3.75)` had 5 diff |
+| CAP-8, CAP-9 | `fit_to_cap(saw, 24, T, G)` | `(..., 91.125, 5.859375)`, 23 entries, 11 diff at 62.0, 64.0, ..., 82.0; first fit `(307.546875, 3.75)` had 22 entries and 0 content |
+| CAP-9 | `fit_to_cap(static(200) + [flat(40 * (i % 6)) for i in range(60)], 24, T, G)` | `(..., 205.03125, 5.859375)`, 23 entries, 0 content: the second fit (10 entries, 0 content) is discarded |
+| CAP-9 | `fit_to_cap(alt(20), 5, T, G)` | the CAP-4 row unchanged, `([0.0, 3.0, 6.0, 9.0, 9.5], 307.546875, 3.0)`: the gate opens (307.5) but the second fit has 0 content, not more |
+| unchanged | every CAP-1..7 row, `static(240)` cap 24, all `[flat(0), patch(100)] * 10` rows | today's values |
+
+Properties CAP-P1, CAP-P2, CAP-P3 are unchanged and must still pass with the second fit in place.
+
+### Errors (step 9)
+
+- `activity`: undefined when `end <= start` or `length <= 0`; do not test.
+- Nothing else new raises. The alternatives in CLI-22 use `fit_to_cap`, so they terminate when it does.

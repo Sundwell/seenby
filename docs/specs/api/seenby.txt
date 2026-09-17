@@ -9,6 +9,8 @@ SHEET_WIDTH = 1568
 THRESHOLD = 12.0
 THUMB = 32
 VERSION = 1
+def activity(thumbs, start, end, length, sample_fps=2)
+    """Mean difference between consecutive thumbnails, one value per segments() entry."""
 def block_max(a, b, bs=8)
     """Largest mean difference over the bs x bs blocks of two thumbnails."""
 def check_out_dir(out_dir, force)

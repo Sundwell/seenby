@@ -147,20 +147,23 @@ def select_frames(thumbs, threshold, max_gap, block_k=BLOCK_K, sample_fps=SAMPLE
     frames = []
     last = None
     last_time = -1e9
+    bar = block_k * threshold
     for i, thumb in enumerate(thumbs):
         t = i / sample_fps
         diff = 0.0 if last is None else _difference(thumb, last)
-        block = 0.0 if last is None else block_max(thumb, last)
+        block = None
         if last is None:
             reason = 'first'
         elif diff > threshold:
             reason = 'diff'
-        elif block_k > 0 and block > block_k * threshold:
+        elif block_k > 0 and bar < 255 and (block := block_max(thumb, last)) > bar:
             reason = 'block'
         elif t - last_time >= max_gap:
             reason = 'timer'
         else:
             continue
+        if block is None:
+            block = 0.0 if last is None else block_max(thumb, last)
         frames.append({'time': t, 'diff': diff, 'block': block, 'reason': reason})
         last = thumb
         last_time = t
@@ -193,14 +196,30 @@ def fit_to_cap(thumbs, max_frames, threshold, max_gap, block_k=BLOCK_K, sample_f
     the last frame: on a static 120 s video with a cap of 24 the selection
     ended at 115.0 s.
     """
-    gap = max_gap
-    while len(select(thumbs, 256.0, gap, 0, sample_fps)) > max_frames:
-        gap *= 1.25
-    while True:
-        kept = select(thumbs, threshold, gap, block_k, sample_fps)
-        if len(kept) <= max_frames:
-            return kept, threshold, gap
+    first = _fit(thumbs, max_frames, max_frames, threshold, max_gap, block_k, sample_fps)
+    if first[1] * BLOCK_K < 255:
+        return first
+    # The first fit degenerated: the threshold went past the point where the
+    # block rule can fire, which happens when timer frames alone fill the cap.
+    # Reserve half the cap for content, then give unused slots back to the timer.
+    second = _fit(thumbs, max_frames, max(2, max_frames // 2), threshold, max_gap, block_k, sample_fps)
+    return second if _content(thumbs, second, block_k, sample_fps) > _content(thumbs, first, block_k, sample_fps) else first
+
+
+def _content(thumbs, fit, block_k, sample_fps):
+    return sum(f['reason'] in ('diff', 'block')
+               for f in select_frames(thumbs, fit[1], fit[2], block_k, sample_fps))
+
+
+def _fit(thumbs, max_frames, budget, threshold, max_gap, block_k, sample_fps):
+    ladder = [max_gap]
+    while len(select(thumbs, 256.0, ladder[-1], 0, sample_fps)) > budget:
+        ladder.append(ladder[-1] * 1.25)
+    while len(select(thumbs, threshold, ladder[-1], block_k, sample_fps)) > max_frames:
         threshold *= 1.5
+    while len(ladder) > 1 and len(select(thumbs, threshold, ladder[-2], block_k, sample_fps)) <= max_frames:
+        ladder.pop()
+    return select(thumbs, threshold, ladder[-1], block_k, sample_fps), threshold, ladder[-1]
 
 
 def segments(times, start, end, length):
@@ -213,6 +232,16 @@ def segments(times, start, end, length):
         out.append({'n': n, 'from': low, 'to': high, 'frames': [
             i for i, t in enumerate(times, 1)
             if (low <= t or n == 1) and (t < high or n == count)]})
+    return out
+
+
+def activity(thumbs, start, end, length, sample_fps=SAMPLE_FPS):
+    """Mean difference between consecutive thumbnails, one value per segments() entry."""
+    out = []
+    for entry in segments([start + i / sample_fps for i in range(len(thumbs))], start, end, length):
+        idx = entry['frames']
+        pairs = [_difference(thumbs[a - 1], thumbs[b - 1]) for a, b in zip(idx, idx[1:])]
+        out.append(round(sum(pairs) / len(pairs), 2) if pairs else 0.0)
     return out
 
 
@@ -433,6 +462,29 @@ def main():
               % (len(thumbs), len(times), args.max_frames, args.threshold, threshold, args.max_gap, max_gap))
         print('  frames: %s' % ', '.join('%.1f %s' % (f['time'], f['reason']) for f in frames))
         print('  layout: %s, tile %d px, %dx%d per sheet' % (grade, tile_width, cols, rows))
+        loop = [f for f in frames if f['reason'] in ('diff', 'block', 'timer')]
+        timers = sum(f['reason'] == 'timer' for f in loop)
+        timer_share = round(timers / len(loop), 2) if loop else 0.0
+        block_active = args.block_k > 0 and args.block_k * threshold < 255
+        if args.block_k > 0 and not block_active:
+            print('  block rule inactive: bar %.1f (%.1f x %.1f) is at or above 255'
+                  % (args.block_k * threshold, args.block_k, threshold))
+        cap_active = threshold > args.threshold or max_gap > args.max_gap
+        if cap_active and len(times) >= 5 and timer_share > 0.7:
+            options = []
+            for cap in (2 * args.max_frames, 3 * args.max_frames):
+                alt_times, alt_thr, alt_gap = fit_to_cap(thumbs, cap, args.threshold, args.max_gap,
+                                                         args.block_k, args.sample_fps)
+                content = sum(f['reason'] in ('diff', 'block')
+                              for f in select_frames(thumbs, alt_thr, alt_gap, args.block_k, args.sample_fps))
+                sheets_n = layout(width, height, len(alt_times), args.sheet_width, args.rows, args.tile_width)[4]
+                options.append((cap, content, alt_thr, sheets_n))
+            if any(o[1] > len(loop) - timers for o in options):
+                print('  %d of %d frames by the timer; %s' % (timers, len(loop), '; '.join(
+                    '--max-frames %d: %d content frames at threshold %.1f (%d sheets)' % o for o in options)))
+            else:
+                print('  %d of %d frames by the timer; no cap up to %d adds a content frame, the recording '
+                      'changes slowly or not at all' % (timers, len(loop), options[-1][0]))
         if args.dry_run:
             return 0
 
@@ -461,8 +513,8 @@ def main():
         'analysis': {'sample_fps': args.sample_fps, 'thumbnails': len(thumbs), 'max_frames': args.max_frames,
                      'threshold': {'requested': args.threshold, 'effective': threshold},
                      'max_gap': {'requested': args.max_gap, 'effective': max_gap},
-                     'block_k': args.block_k, 'range': {'from': start, 'to': end},
-                     'segment': args.segment, 'all_timer': all_timer},
+                     'block_k': args.block_k, 'block_active': block_active, 'range': {'from': start, 'to': end},
+                     'segment': args.segment, 'all_timer': all_timer, 'timer_share': timer_share},
         'sheet': {'cols': cols, 'rows': rows, 'tile_width': tile_width, 'sheet_width': args.sheet_width,
                   'count': len(sheets)},
         'frames': [{
@@ -474,7 +526,8 @@ def main():
         } for n, (f, path) in enumerate(zip(frames, paths), 1)],
         'sheets': [{'file': os.path.basename(sheet), 'frames': [first + 1, min(first + per_sheet, len(paths))]}
                    for sheet, first in zip(sheets, range(0, len(paths), per_sheet))],
-        'segments': segments(times, start, end, args.segment),
+        'segments': [dict(entry, activity=act) for entry, act in zip(
+            segments(times, start, end, args.segment), activity(thumbs, start, end, args.segment, args.sample_fps))],
     }
     manifest_path = os.path.join(out_dir, 'frames.json')
     write_json(manifest_path, manifest)

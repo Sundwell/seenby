@@ -66,7 +66,8 @@ what to change. Exit codes: 0 done, 1 could not run (one line on stderr, no trac
   "analysis": {"sample_fps": 2.0, "thumbnails": 54, "max_frames": 24,
                "threshold": {"requested": 12.0, "effective": 12.0},
                "max_gap": {"requested": 3.0, "effective": 3.0}, "block_k": 5.0,
-               "range": {"from": 0.0, "to": 27.1}, "segment": 120.0, "all_timer": false},
+               "block_active": true, "range": {"from": 0.0, "to": 27.1}, "segment": 120.0,
+               "all_timer": false, "timer_share": 0.7},
   "sheet": {"cols": 3, "rows": 2, "tile_width": 516, "sheet_width": 1568, "count": 2},
   "frames": [
     {"n": 1, "time": 0.0, "file": "frame-01-0.0s.jpg", "sheet": 1, "reason": "first", "diff": 0.0, "block": 0.0,
@@ -75,14 +76,17 @@ what to change. Exit codes: 0 done, 1 could not run (one line on stderr, no trac
      "recheck": "..."}
   ],
   "sheets": [{"file": "sheet-01.jpg", "frames": [1, 6]}, {"file": "sheet-02.jpg", "frames": [7, 12]}],
-  "segments": [{"n": 1, "from": 0.0, "to": 27.1, "frames": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]}]
+  "segments": [{"n": 1, "from": 0.0, "to": 27.1, "frames": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                "activity": 4.3}]
 }
 ```
 
-Numbers in the file are full floats (`6.9111328125`), rounded here for reading. `reason` is why the frame
-was kept: `first`, `diff` (mean difference above the threshold), `block` (one 8x8 block of the thumbnail
-changed strongly), `timer` (forced after `max_gap` seconds), `last`. `segments` index the frames by stretches
-of `--segment` seconds, so a reader of a long recording knows where to zoom in.
+Numbers in the file are full floats (`6.9111328125`), rounded here for reading. `timer_share` is the share of timer
+frames among those the selection loop chose; `block_active` says whether the block rule could still fire at the
+effective threshold. `reason` is why the frame was kept: `first`, `diff` (mean difference above the threshold),
+`block` (one 8x8 block of the thumbnail changed strongly), `timer` (forced after `max_gap` seconds), `last`.
+`segments` index the frames by stretches of `--segment` seconds, with `activity` (mean change between consecutive
+thumbnails, 0 to 255) per stretch, so a reader of a long recording knows where to zoom in.
 
 **Reading rule.** Sheets are for meaning. A number read off a tile once came out as 118 instead of 218. For
 digits, run the frame's `recheck` command and read the native frame.
@@ -109,12 +113,14 @@ or the manifest tells you why.
 Layout by aspect ratio: phone screens get 256 px tiles in 6 columns, desktop windows 516 px in 3, wide
 desktops 776 px in 2, so UI text stays readable after the model downscales the sheet.
 
-**Long recordings.** The cap works in two steps: first the gap between forced frames is stretched until the
-timer frames alone fit, then the threshold is raised until everything fits. On a 20-minute concatenation of test
-recordings that
-meant a gap of 55 s and a threshold of 205 instead of 12, so no frame was kept for its content; the console
-says so. Use `--from/--to` on the stretch you care about (the `segments` index tells you which), or
-`--max-frames` if you accept more sheets.
+**Long recordings.** The cap first stretches the gap between timer frames until they alone fit, then raises
+the threshold until everything fits. When that pushes the threshold past the point where the block rule can
+fire, a second fit reserves half the cap for content and gives unused slots back to the timer; it is kept only
+if it finds more content frames. On a 20-minute concatenation of test recordings that turned 0 content frames
+out of 24 into 18. The console still says when the cap was binding: `block rule inactive` when the bar passed
+255, and `N of M frames by the timer` with what `--max-frames 48` and `72` would buy, computed on the same
+thumbnails. `segments[].activity` in `frames.json` shows where the picture moved, so a reader can zoom with
+`--from/--to` on the right stretch instead of raising the cap.
 
 ## Speech: seenby_report.py
 
