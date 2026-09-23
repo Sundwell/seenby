@@ -15,9 +15,7 @@ time, and `frames.json` with the time and reason of every frame.
 
 ## Why not `select='gt(scene,X)'`
 
-ffmpeg's scene detection compares each frame with the previous one. Someone recording a phone screen scrolls
-smoothly, so neighbouring frames are nearly identical and no threshold ever fires. Measured on four real
-customer recordings: scene detection returned zero frames.
+ffmpeg's scene detection compares each frame with the one right before it. A screen recording changes a little at a time, a smooth scroll or a dropdown opening, so neighbouring frames look almost the same. Measured on 11 real screen recordings at threshold 0.08: it kept no frames at all on 4, and on 7 the last 2 to 27 seconds had no frame. On a 100-second smooth scroll the threshold decides between 212 frames (0.08) and a 64-second hole with the last 15.6 seconds missing (0.30).
 
 seenby compares each frame with the last frame it kept. The change accumulates, and a couple of seconds of
 scrolling crosses the threshold. A frame is also forced every few seconds of stillness, the first and the last
