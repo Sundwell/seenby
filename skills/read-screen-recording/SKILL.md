@@ -1,5 +1,5 @@
 ---
-name: seenby
+name: read-screen-recording
 description: "Read a screen recording (video file) the user shares or points at: bug report, demo, test run, client video, screencast, .mp4/.mov/.webm/.mkv. Runs seenby.py to turn it into contact sheets and frames.json, then reads them. Use whenever a task involves understanding what happens in a screen recording."
 ---
 

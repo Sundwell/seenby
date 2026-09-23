@@ -41,6 +41,8 @@ It asks which agents to install into, among them Claude Code, Codex, Cursor, Ope
 | Codex | `codex plugin marketplace add Sundwell/seenby`, then `codex plugin add seenby@seenby` |
 | Pi | `pi install git:github.com/Sundwell/seenby` |
 
+The agent picks the skill by its name and description. With many skills installed and a model with a 200K context, Claude Code drops the descriptions of rarely used skills from its listing and the agent sees only the name. If the agent does not reach for it, call it directly with `/seenby:read-screen-recording` (plugin) or `/read-screen-recording` (`npx skills`) in Claude Code, `/skill:read-screen-recording` in Pi, or `$` and the skill in Codex. In Claude Code the `skillListingBudgetFraction` setting (for example `0.02`) keeps more descriptions.
+
 Every route needs two things on the machine that no installer adds.
 
 - Python 3.8 or newer, `ffmpeg` and `ffprobe` on PATH (or `FFMPEG=/path/to/ffmpeg`, `FFPROBE=...`).
@@ -201,7 +203,7 @@ try to match. A side-by-side table on public recordings will replace this paragr
 
 ## The skill
 
-`skills/seenby/SKILL.md` teaches an agent when to run seenby, how to read `frames.json`, and what to do when the console warns. The folder also holds copies of both scripts and `requirements-whisper.txt`, so an installed skill runs without the repository. The copies are byte-for-byte the files at the root. Any agent with a terminal can also run the scripts directly; the skill is a convenience.
+`skills/read-screen-recording/SKILL.md` teaches an agent when to run seenby, how to read `frames.json`, and what to do when the console warns. The folder also holds copies of both scripts and `requirements-whisper.txt`, so an installed skill runs without the repository. The copies are byte-for-byte the files at the root. Any agent with a terminal can also run the scripts directly; the skill is a convenience.
 
 ## Tests
 
