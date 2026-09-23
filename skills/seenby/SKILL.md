@@ -1,6 +1,6 @@
 ---
 name: seenby
-description: Read a screen recording (video file) the user shares or points at: bug report, demo, test run, client video, screencast, .mp4/.mov/.webm/.mkv. Runs seenby.py to turn it into contact sheets and frames.json, then reads them. Use whenever a task involves understanding what happens in a screen recording.
+description: "Read a screen recording (video file) the user shares or points at: bug report, demo, test run, client video, screencast, .mp4/.mov/.webm/.mkv. Runs seenby.py to turn it into contact sheets and frames.json, then reads them. Use whenever a task involves understanding what happens in a screen recording."
 ---
 
 # seenby: read a screen recording
@@ -11,12 +11,10 @@ one look) and `frames.json` with the time and reason of every kept frame. Read t
 ## Run it
 
 ```
-python3 <path-to>/seenby.py <recording> <out-dir>
+python3 <skill-dir>/seenby.py <recording> <out-dir>
 ```
 
-`<path-to>` is where this skill's repository is checked out; if `seenby.py` is not found, ask the user where
-it is or clone `https://github.com/Sundwell/seenby`. Requires `ffmpeg` and `ffprobe` on PATH. No Python
-packages.
+`<skill-dir>` is the folder this SKILL.md is in; `seenby.py` and `seenby_report.py` sit next to it. Use `python` where `python3` is not found (Windows). Needs Python 3.8 or newer and `ffmpeg` and `ffprobe` on PATH, no Python packages. If it exits 1 because ffmpeg is missing, tell the user to install it (`brew install ffmpeg`, `sudo apt install ffmpeg`, `winget install ffmpeg`) and stop; do not fall back to guessing from the file name.
 
 Always start with no options. The console tells you what happened:
 
@@ -75,11 +73,10 @@ If the recording has narration, run the wrapper instead; it runs the core and ad
 under each frame:
 
 ```
-python3 <path-to>/seenby_report.py <recording> <out-dir>
+python3 <skill-dir>/seenby_report.py <recording> <out-dir>
 ```
 
-It needs `pip install -r requirements-whisper.txt` only when the audio is above its gate; silent recordings
-are reported without a model. Any option it does not know goes to the core unchanged.
+It needs `pip install -r <skill-dir>/requirements-whisper.txt` only when the audio is above its gate; silent recordings are reported without a model. Ask the user before installing it, the packages are large. Any option it does not know goes to the core unchanged.
 
 ## What seenby cannot do
 

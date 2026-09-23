@@ -1,0 +1,12 @@
+{
+  "name": "seenby",
+  "description": "Read a screen recording: contact sheets plus frames.json that an agent reads in one pass. Needs ffmpeg.",
+  "author": {
+    "name": "Serhii Liamtsev",
+    "url": "https://github.com/Sundwell"
+  },
+  "homepage": "https://github.com/Sundwell/seenby",
+  "repository": "https://github.com/Sundwell/seenby",
+  "license": "MIT",
+  "keywords": ["screen-recording", "video", "contact-sheet", "bug-report", "ffmpeg"]
+}

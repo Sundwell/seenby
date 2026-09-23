@@ -27,9 +27,26 @@ corner of the screen (a dropdown, a highlight moving one row) that the mean is b
 
 ## Install
 
+One command installs the skill into your agent.
+
+```
+npx skills add Sundwell/seenby -g
+```
+
+It asks which agents to install into, among them Claude Code, Codex, Cursor, OpenCode, Pi, Gemini CLI and GitHub Copilot. Then give the agent a recording and ask what happens in it. The native routes do the same.
+
+| Agent | Command |
+|---|---|
+| Claude Code | `/plugin marketplace add Sundwell/seenby`, then `/plugin install seenby@seenby` |
+| Codex | `codex plugin marketplace add Sundwell/seenby`, then `codex plugin add seenby@seenby` |
+| Pi | `pi install git:github.com/Sundwell/seenby` |
+
+Every route needs two things on the machine that no installer adds.
+
 - Python 3.8 or newer, `ffmpeg` and `ffprobe` on PATH (or `FFMPEG=/path/to/ffmpeg`, `FFPROBE=...`).
-- No packages for the core. `seenby_report.py` needs `pip install -r requirements-whisper.txt` only for
-  recordings whose audio is above its gate; silent ones are reported without it.
+- No packages for the core. `seenby_report.py` needs `pip install -r requirements-whisper.txt` only for recordings whose audio is above its gate; silent ones are reported without it.
+
+To run the scripts by hand, clone the repository. Both are single files.
 
 ## What you get
 
@@ -182,12 +199,9 @@ came later and has not been re-measured against `claude-real-video`. It aims at 
 camera footage with cuts `claude-real-video` has scene detection and a motion channel that seenby does not
 try to match. A side-by-side table on public recordings will replace this paragraph.
 
-## Claude Code skill
+## The skill
 
-`skill/SKILL.md` teaches an agent when to run seenby, how to read `frames.json`, and what to do when the
-console warns. Install it for one project by copying the folder to `.claude/skills/seenby/` inside that
-project, or for every project with `cp -r skill ~/.claude/skills/seenby`. Any harness with a terminal can use
-the scripts directly; the skill is a convenience.
+`skills/seenby/SKILL.md` teaches an agent when to run seenby, how to read `frames.json`, and what to do when the console warns. The folder also holds copies of both scripts and `requirements-whisper.txt`, so an installed skill runs without the repository. The copies are byte-for-byte the files at the root. Any agent with a terminal can also run the scripts directly; the skill is a convenience.
 
 ## Tests
 

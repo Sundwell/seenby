@@ -1,0 +1,16 @@
+{
+  "name": "seenby",
+  "owner": {
+    "name": "Serhii Liamtsev",
+    "url": "https://github.com/Sundwell"
+  },
+  "description": "Every screen recording, seen by your agent.",
+  "plugins": [
+    {
+      "name": "seenby",
+      "source": "./",
+      "description": "Read a screen recording: contact sheets plus frames.json that an agent reads in one pass. Needs ffmpeg.",
+      "category": "productivity"
+    }
+  ]
+}
