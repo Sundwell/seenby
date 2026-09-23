@@ -28,8 +28,10 @@ Exit codes: 0 done, 1 could not run, 2 bad arguments.
 """
 
 import argparse
+import functools
 import json
 import math
+import operator
 import os
 import shlex
 import shutil
@@ -116,8 +118,9 @@ def thumbnails(path, sample_fps=SAMPLE_FPS, start=0.0, length=None):
     return [raw[i:i + size] for i in range(0, len(raw) - size + 1, size)]
 
 
+@functools.lru_cache(maxsize=None)
 def _difference(a, b):
-    return sum(abs(x - y) for x, y in zip(a, b)) / len(a)
+    return sum(map(abs, map(operator.sub, a, b))) / len(a)
 
 
 def block_max(a, b, bs=BLOCK):
@@ -130,14 +133,16 @@ def block_max(a, b, bs=BLOCK):
     corner. K was picked on ten recordings and the useful range is narrow:
     k=3.3 doubles the frames on one of them, k=8 changes nothing anywhere.
     """
+    return _block_max(a, b, bs)
+
+
+@functools.lru_cache(maxsize=None)
+def _block_max(a, b, bs):
+    diff = list(map(abs, map(operator.sub, a, b)))
     best = 0.0
     for by in range(0, THUMB, bs):
         for bx in range(0, THUMB, bs):
-            total = 0
-            for y in range(by, by + bs):
-                row = y * THUMB
-                for x in range(bx + row, bx + row + bs):
-                    total += abs(a[x] - b[x])
+            total = sum(sum(diff[y * THUMB + bx:y * THUMB + bx + bs]) for y in range(by, by + bs))
             best = max(best, total / (bs * bs))
     return best
 
