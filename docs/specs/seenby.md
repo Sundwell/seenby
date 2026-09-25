@@ -1019,3 +1019,50 @@ Properties CAP-P1, CAP-P2, CAP-P3 are unchanged and must still pass with the sec
 
 - `activity`: undefined when `end <= start` or `length <= 0`; do not test.
 - Nothing else new raises. The alternatives in CLI-22 use `fit_to_cap`, so they terminate when it does.
+
+## Step 10: the all-timer line names --threshold (drafted 2026-09-25, implemented 2026-09-26)
+
+Anchored since 2026-09-26. Written as a draft before the code existed; the tester wrote red tests from it, a review moved `<m>` to the last kept frame.
+
+Why. A real bug-report recording (reported by an agent on 2026-09-25, 23.6 s, 2560x1228, a light web page with a light DevTools pane) kept 9 frames, all by the timer. DevTools opening over a third of the screen changed the 32x32 thumbnail by 3.6 on average, and the largest change of any thumbnail against the last kept frame over the whole recording was 4.4, under the default threshold 12, so the threshold could not fire anywhere. The console line said `try --max-frames, --block-k or --from/--to`. The cap was not binding (9 of 24), so `--max-frames` changed nothing, and the knob that helped, `--threshold`, was not named. With `--threshold 2` every event of the recording was kept. This step changes only the console line. The selection, the manifest and every frame stay byte-identical.
+
+### Public surface added or changed
+
+None. `seenby.txt` does not change.
+
+### main(), amended
+
+CLI-24 (amends CLI-23, the "all frames taken by the timer" line only) When `all_timer` is true and the cap was not active (the CLI-23 condition is false, that is the effective threshold equals the requested one and the effective gap equals the requested one), the line takes one of the two forms below.
+
+           all frames taken by the timer: the largest change between thumbnails was <m %.1f>, under the threshold <threshold %.1f>; --threshold <t %.1f>: <content> content frames at threshold <t2 %.1f> (<sheets> sheets)
+           all frames taken by the timer: the largest change between thumbnails was <m %.1f>, under the threshold <threshold %.1f>
+
+       `<m>` is the largest SEL-3 mean difference between an analysed thumbnail and the last frame kept before it in the final selection, over every thumbnail after the first, `0.0` when there is only one. This is the difference the threshold was compared with, so under `all_timer` it is never above the effective threshold. Consecutive thumbnails are not enough: a slow change (typing, a progress bar) moves little from one thumbnail to the next and a lot between kept frames. The first form is used when `m > 1.0`, the second when `m <= 1.0`. `<t>` is `max(1.0, math.floor(m * 10 / 3) / 10)`, computed in exactly this order. The alternative is `fit_to_cap(thumbs, max_frames, t, max_gap, block_k, sample_fps)` with the requested cap, gap, block factor and rate. `<content>` is its count of frames with reason `diff` or `block` in `select_frames` at its returned threshold and gap, `<t2>` its returned threshold, `<sheets>` is `layout(width, height, <its frame count>, sheet_width, rows, tile_width)[4]`. `<threshold>` is the effective threshold, equal to the requested one here.
+
+       When the cap was active the line is exactly as CLI-23 has it. The line keeps its place (after the "contact sheets" line and the "more than 4" line) and, as before, does not print under `--dry-run`.
+
+       Why a third. On the recording above the kept set is the same for every threshold from 1.3 to 2.0. The frame that shows the reported bug differs from the frame before it by 2.02 and drops out at 2.1, so half of the largest change (2.2) loses it and a third (1.4) keeps it with a margin. Why 1.0. On the same recording, between consecutive thumbnails, stretches without change differ by 0.00 to 0.09, cursor-only moves by 0.5 to 0.97, and the smallest real UI change (a sidebar collapsing) by 1.45. Below 1.0 a lower threshold would only keep cursor moves and compression noise. Both constants rest on one recording and belong to the hint, not to the selection.
+
+Rows of earlier steps whose stdout changes, because their thumbnails are static and the cap is inactive, are the CLI-14 `static(30)` row, the CLI-18 `static(30)` row, the CLI-21 `static(30)` row and the CLI-23 row that refers to it. In each, the "all frames" line becomes `  all frames taken by the timer: the largest change between thumbnails was 0.0, under the threshold 12.0`. The CLI-16/MAN-11 row with `--block-k 0` and `[flat(0), patch(100)] * 10` still prints the line, now in the first form (see the examples). The CLI-23 rows with an active cap (`static(240)` at 125 s, `alt(30)`, the MAN-4 `--max-frames 5` row) keep today's line.
+
+### Examples (step 10)
+
+`steps(a, b)` is `[flat(0)] * 10 + [flat(a)] * 10 + [flat(b)] * 10` (30 thumbnails, 14.5 s). For every row the fakes are as before, `probe` returns `(15.0, 800, 600)` unless said otherwise, and the selection is `0.0 first, 3.0 timer, 6.0 timer, 9.0 timer, 12.0 timer, 14.5 last` unless said otherwise.
+
+| ID | Input | Result |
+|---|---|---|
+| CLI-24 | argv `['clip.mp4', 'out']`, thumbnails `steps(4, 8)` | line `  all frames taken by the timer: the largest change between thumbnails was 4.0, under the threshold 12.0; --threshold 1.3: 2 content frames at threshold 1.3 (1 sheets)` (at 1.3 the selection is `0.0 first, 3.0 timer, 5.0 diff, 8.0 timer, 10.0 diff, 13.0 timer, 14.5 last`) |
+| CLI-24 | argv `['clip.mp4', 'out', '--threshold', '30']`, thumbnails `steps(4, 8)` | line `  all frames taken by the timer: the largest change between thumbnails was 4.0, under the threshold 30.0; --threshold 1.3: 2 content frames at threshold 1.3 (1 sheets)` |
+| CLI-24 | argv `['clip.mp4', 'out']`, thumbnails `[flat(0)] * 10 + [flat(2)] * 20` | line `  all frames taken by the timer: the largest change between thumbnails was 2.0, under the threshold 12.0; --threshold 1.0: 1 content frames at threshold 1.0 (1 sheets)` (`math.floor(20 / 3) / 10` is 0.6, raised to 1.0) |
+| CLI-24 | argv `['clip.mp4', 'out']`, thumbnails `[flat(i // 2) for i in range(30)]` (a slow creep, consecutive thumbnails differ by at most 1.0) | line `  all frames taken by the timer: the largest change between thumbnails was 3.0, under the threshold 12.0; --threshold 1.0: 7 content frames at threshold 1.0 (1 sheets)` (m is 3.0, the timer frame at 3.0 against the one at 0.0; at 1.0 the selection is `0.0 first, 2.0 diff, 4.0 diff, 6.0 diff, 8.0 diff, 10.0 diff, 12.0 diff, 14.0 diff, 14.5 last`) |
+| CLI-24 | argv `['clip.mp4', 'out']`, thumbnails `[flat(0)] * 10 + [flat(1)] * 20` | line `  all frames taken by the timer: the largest change between thumbnails was 1.0, under the threshold 12.0` (m is not above 1.0) |
+| CLI-24 | argv `['clip.mp4', 'out']`, thumbnails `static(30)` | line `  all frames taken by the timer: the largest change between thumbnails was 0.0, under the threshold 12.0`; the rest of stdout as the CLI-21 `static(30)` row |
+| CLI-24 | argv `['clip.mp4', 'out', '--block-k', '0']`, thumbnails `[flat(0), patch(100)] * 10` | selection `0.0 first, 3.0 timer, 6.0 timer, 9.0 timer, 9.5 last`; line `  all frames taken by the timer: the largest change between thumbnails was 6.2, under the threshold 12.0; --threshold 2.0: 19 content frames at threshold 2.0 (3 sheets)` (m is 6.25) |
+| CLI-24 | argv `['clip.mp4', 'out', '--block-k', '0']`, probe `(30.0, 800, 600)`, thumbnails `[flat(0), patch(100)] * 30` | selection `0.0 first`, timer frames every 3.0 s up to 27.0, `29.5 last`; line `  all frames taken by the timer: the largest change between thumbnails was 6.2, under the threshold 12.0; --threshold 2.0: 0 content frames at threshold 6.8 (2 sheets)` (at 2.0 all 60 thumbnails differ, the cap raises the threshold to 6.75, above 6.25) |
+| CLI-24 | argv `['clip.mp4', 'out', '--dry-run']`, thumbnails `steps(4, 8)` | no "all frames" line (CLI-19 unchanged) |
+| CLI-24, CLI-23 | the CLI-23 `static(240)` row at 125 s, the `alt(30)` row, the MAN-4 `--max-frames 5` row | the "all frames" line exactly as today, `... the threshold contributed nothing (effective <%.1f>); try --max-frames, --block-k or --from/--to` |
+| unchanged | every `frames.json` of the rows above | identical to what the same argv gives today; only stdout changes |
+
+### Errors (step 10)
+
+Nothing new raises. The alternative uses `fit_to_cap`, so it terminates when it does.

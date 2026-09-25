@@ -132,6 +132,14 @@ ALL_TIMER = (
     "All frames were taken by the timer; the threshold contributed nothing (effective 205.0). "
     "Try --max-frames, --block-k or --from/--to."
 )
+ALL_TIMER_CAP_INACTIVE = (
+    "All frames were taken by the timer; the threshold contributed nothing (effective 12.0). "
+    "The seenby.py console output says whether a lower --threshold would keep more."
+)
+ALL_TIMER_CAP_ACTIVE_VIA_GAP = (
+    "All frames were taken by the timer; the threshold contributed nothing (effective 12.0). "
+    "Try --max-frames, --block-k or --from/--to."
+)
 NO_SPEECH = "(no speech in this interval)"
 
 
@@ -701,6 +709,21 @@ def test_rpt_15_all_timer_line_follows_the_first_header_line():
     assert lines[2] == HEADER
     assert lines[3] == ALL_TIMER
     assert lines[4] == AUDIO_SILENT
+
+
+@pytest.mark.spec("RPT-17")
+def test_rpt_17_names_a_lower_threshold_when_the_cap_was_not_active():
+    manifest = manifest_with(("analysis.all_timer", True))
+    lines = report_module().render(manifest, None, SILENT, None).splitlines()
+    assert lines[3] == ALL_TIMER_CAP_INACTIVE
+    assert "Try" not in lines[3]
+
+
+@pytest.mark.spec("RPT-17")
+def test_rpt_17_keeps_the_old_sentence_when_the_gap_was_stretched():
+    manifest = manifest_with(("analysis.all_timer", True), ("analysis.max_gap.effective", 5.0))
+    lines = report_module().render(manifest, None, SILENT, None).splitlines()
+    assert lines[3] == ALL_TIMER_CAP_ACTIVE_VIA_GAP
 
 
 @pytest.mark.spec("RPT-15")

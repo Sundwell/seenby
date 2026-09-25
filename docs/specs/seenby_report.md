@@ -275,3 +275,15 @@ RPT-P1  For `frames` a list of 1..20 entries with strictly increasing `time` flo
   for a missing `video`.
 - The device fallback (RPT-11) is hands-on. A `--device` value other than `auto`, `cuda`, `cpu` is an argparse
   error, code 2.
+
+## Amendment 2026-09-25: the all-timer sentence (implemented 2026-09-26)
+
+Why. The sentence pointed to `--max-frames` also when the cap was not binding, where that option changes nothing; on a wide light recording the knob that helped was `--threshold` (`docs/specs/seenby.md`, step 10). Whether a lower threshold helps depends on the largest change, which the manifest does not hold, so the report does not advise it and points to the core's console line, which `main()` prints unchanged (RPT-6).
+
+RPT-17 (amends RPT-15, the "All frames were taken by the timer" sentence only) When `analysis.threshold.effective` equals `analysis.threshold.requested` and `analysis.max_gap.effective` equals `analysis.max_gap.requested`, the sentence is `All frames were taken by the timer; the threshold contributed nothing (effective <analysis.threshold.effective %.1f>). The seenby.py console output says whether a lower --threshold would keep more.` Otherwise it is exactly as RPT-15 has it.
+
+| ID | Input | Result |
+|---|---|---|
+| RPT-17 | `render(MANIFEST with analysis.all_timer true, None, (-91.0, -91.0), None)` (threshold 12.0 -> 12.0, gap 3.0 -> 3.0) | contains `All frames were taken by the timer; the threshold contributed nothing (effective 12.0). The seenby.py console output says whether a lower --threshold would keep more.` and not `Try` |
+| RPT-17 | `render(MANIFEST with analysis.all_timer true and max_gap.effective 5.0, None, (-91.0, -91.0), None)` (threshold 12.0 -> 12.0) | contains `All frames were taken by the timer; the threshold contributed nothing (effective 12.0). Try --max-frames, --block-k or --from/--to.` |
+| RPT-17, RPT-15 | the RPT-15 row with `threshold.effective` 205.0 | unchanged |

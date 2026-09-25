@@ -45,10 +45,8 @@ digit, amount, ID, or code, run the frame's `recheck` command from `frames.json`
 
 ## When the console warns you
 
-- `all frames taken by the timer: the threshold contributed nothing` means nothing changed enough to be
-  noticed, or the recording is long and the cap of 24 frames raised the threshold until only timer frames
-  remained. For a short recording that is usually the truth (a static screen). For a long one (minutes), pick
-  the stretch you care about and rerun with `--from S --to S`; `segments[]` in `frames.json` shows what is where.
+- `all frames taken by the timer: the largest change between thumbnails was 4.4, under the threshold 12.0; --threshold 1.4: 9 content frames ...` means the picture did change, but too little for the default threshold. That happens on wide, light screens, where a change is thin text on white. Rerun with the `--threshold` the line names and read the new sheets. When the line stops after `under the threshold 12.0` with no suggestion, the largest change was 1.0 or less, about the size of a cursor move, and the timer frames are the whole story.
+- `all frames taken by the timer: the threshold contributed nothing ... try --max-frames` means the recording is long and the cap of 24 frames raised the threshold until only timer frames remained. Pick the stretch you care about and rerun with `--from S --to S`; `segments[]` in `frames.json` shows what is where.
 - `N contact sheets are more than 4` means a lot of change; read them all or narrow with `--from/--to`.
 - Fewer frames than you expected around a moment the user asked about: rerun with `--dry-run --from S --to S`
   around it (prints the times it would pick, extracts nothing), then without `--dry-run`. `--sample-fps 4`
@@ -60,6 +58,7 @@ digit, amount, ID, or code, run the frame's `recheck` command from `frames.json`
 |---|---|---|
 | `--from S --to S` | whole video | the user names a moment, or the recording is longer than a few minutes |
 | `--max-frames N` | 24 | you accept more sheets to see more moments |
+| `--threshold X` | 12 | the all-timer line names a lower value; lower keeps smaller changes |
 | `--sample-fps F` | 2 | events are short (tooltips, flashes) |
 | `--dry-run` | | you want the selected times before extracting anything |
 | `--block-k 0` | 5 | too many `block` frames from a blinking element; disables the local metric |

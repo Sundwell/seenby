@@ -70,8 +70,7 @@ demo.mp4: 27.1 s, 814x872, portrait
   manifest: demo-frames/frames.json. Sheets are for meaning; read digits from the native frame, see "recheck" in the manifest.
 ```
 
-When every frame was taken by the timer and the threshold contributed nothing, a line says so and suggests
-what to change. Exit codes: 0 done, 1 could not run (one line on stderr, no traceback), 2 bad arguments.
+When every frame was taken by the timer, a line says so. If the frame cap was not what raised the threshold, the line gives the largest change between thumbnails and what a lower `--threshold` would keep. On a 2560-pixel light web page with a light DevTools pane the largest change was 4.4, the default 12 could not fire anywhere, and `--threshold 1.4` kept every event. Exit codes: 0 done, 1 could not run (one line on stderr, no traceback), 2 bad arguments.
 
 ## frames.json
 

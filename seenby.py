@@ -540,9 +540,25 @@ def main():
     print('  contact sheets: %s' % ', '.join(sheets or paths))
     if len(sheets) > 4:
         print('  %d contact sheets are more than 4; consider --max-frames or --from/--to' % len(sheets))
-    if all_timer:
+    if all_timer and cap_active:
         print('  all frames taken by the timer: the threshold contributed nothing (effective %.1f); '
               'try --max-frames, --block-k or --from/--to' % threshold)
+    elif all_timer:
+        kept = {round((f['time'] - start) * args.sample_fps) for f in frames}
+        largest, last = 0.0, thumbs[0]
+        for i, thumb in enumerate(thumbs[1:], 1):
+            largest = max(largest, _difference(thumb, last))
+            if i in kept:
+                last = thumb
+        line = ('  all frames taken by the timer: the largest change between thumbnails was %.1f, '
+                'under the threshold %.1f' % (largest, threshold))
+        if largest > 1.0:
+            lower = max(1.0, math.floor(largest * 10 / 3) / 10)
+            alt = fit_to_cap(thumbs, args.max_frames, lower, args.max_gap, args.block_k, args.sample_fps)
+            sheets_n = layout(width, height, len(alt[0]), args.sheet_width, args.rows, args.tile_width)[4]
+            line += '; --threshold %.1f: %d content frames at threshold %.1f (%d sheets)' % (
+                lower, _content(thumbs, alt, args.block_k, args.sample_fps), alt[1], sheets_n)
+        print(line)
     print('  manifest: %s. Sheets are for meaning; read digits from the native frame, '
           'see "recheck" in the manifest.' % manifest_path)
     return 0

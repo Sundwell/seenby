@@ -159,8 +159,11 @@ def render(manifest, speech, audio, model_info):
     if rng['from'] > 0 or rng['to'] < video['duration']:
         out.append('Range %.1f-%.1f s.' % (rng['from'], rng['to']))
     if analysis['all_timer']:
-        out.append('All frames were taken by the timer; the threshold contributed nothing (effective %.1f). '
-                   'Try --max-frames, --block-k or --from/--to.' % analysis['threshold']['effective'])
+        capped = (analysis['threshold']['effective'] != analysis['threshold']['requested']
+                  or analysis['max_gap']['effective'] != analysis['max_gap']['requested'])
+        out.append('All frames were taken by the timer; the threshold contributed nothing (effective %.1f). %s' % (
+            analysis['threshold']['effective'], 'Try --max-frames, --block-k or --from/--to.' if capped else
+            'The seenby.py console output says whether a lower --threshold would keep more.'))
     if speech is None:
         out.append('Audio: mean %.1f dB, max %.1f dB. No speech expected (gate -45/-80 dB, unverified); '
                    'pass --transcribe-anyway to transcribe.' % (mean_db, max_db))

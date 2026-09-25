@@ -67,6 +67,10 @@ def blocky():
     return [flat(0), patch(100)] * 10
 
 
+def steps(a, b):
+    return [flat(0)] * 10 + [flat(a)] * 10 + [flat(b)] * 10
+
+
 thumbs_st = st.lists(st.binary(min_size=1024, max_size=1024), min_size=0, max_size=60)
 threshold_st = st.floats(min_value=0.1, max_value=300.0)
 max_gap_st = st.floats(min_value=0.5, max_value=30.0)
@@ -1371,6 +1375,13 @@ ALL_TIMER_LINE = (
     "  all frames taken by the timer: the threshold contributed nothing (effective {threshold}); "
     "try --max-frames, --block-k or --from/--to"
 )
+ALL_TIMER_M_LINE = (
+    "  all frames taken by the timer: the largest change between thumbnails was {m}, "
+    "under the threshold {threshold}"
+)
+ALL_TIMER_M_SUGGEST_LINE = (
+    ALL_TIMER_M_LINE + "; --threshold {t}: {content} content frames at threshold {t2} ({sheets} sheets)"
+)
 LAYOUT_LINE = "  layout: {grade}, tile {tile} px, {cols}x{rows} per sheet"
 MANY_SHEETS_LINE = "  {n} contact sheets are more than 4; consider --max-frames or --from/--to"
 RANGE_LINE = "  range: {start}-{end} s"
@@ -1559,7 +1570,7 @@ STATIC_30_DRY_RUN_STDOUT = (
 STATIC_30_STDOUT = (
     STATIC_30_DRY_RUN_STDOUT
     + "  contact sheets: out/sheet-01.jpg\n"
-    + ALL_TIMER_LINE.format(threshold="12.0") + "\n"
+    + ALL_TIMER_M_LINE.format(m="0.0", threshold="12.0") + "\n"
     + MANIFEST_LINE.format(out_dir="out") + "\n"
 )
 
@@ -2004,7 +2015,7 @@ def test_cli_23_two_sheets_are_joined_on_the_contact_sheets_line(monkeypatch, ca
         "  frames: 0.0 first, " + ", ".join("%.1f timer" % t for t in range(3, 31, 3)) + "\n"
         "  layout: window, tile 516 px, 3x3 per sheet\n"
         "  contact sheets: out/sheet-01.jpg, out/sheet-02.jpg\n"
-        + ALL_TIMER_LINE.format(threshold="12.0") + "\n"
+        + ALL_TIMER_M_LINE.format(m="0.0", threshold="12.0") + "\n"
         + MANIFEST_LINE.format(out_dir="out") + "\n"
     )
 
@@ -2031,7 +2042,8 @@ def test_cli_23_man_11_no_all_timer_line_with_four_frames(monkeypatch, capsys, t
 
 
 @pytest.mark.spec("CLI-23")
-def test_cli_23_all_timer_line_carries_the_effective_threshold(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-24")
+def test_cli_23_24_all_timer_line_carries_the_effective_threshold(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--max-frames", "5"], alt(20))
     lines = run.out.splitlines()
     assert run.rc == 0
@@ -2072,7 +2084,7 @@ def test_cli_23_man_7_8_12_more_than_four_sheets_get_a_warning_line(monkeypatch,
         "  layout: window, tile 516 px, 3x1 per sheet\n"
         "  contact sheets: " + ", ".join(sheets) + "\n"
         + MANY_SHEETS_LINE.format(n=6) + "\n"
-        + ALL_TIMER_LINE.format(threshold="12.0") + "\n"
+        + ALL_TIMER_M_LINE.format(m="0.0", threshold="12.0") + "\n"
         + MANIFEST_LINE.format(out_dir="out") + "\n"
     )
     assert len(run.out.splitlines()) == 8
@@ -2094,7 +2106,7 @@ def test_cli_23_exactly_four_sheets_get_no_warning_line(monkeypatch, capsys, tmp
     assert len(lines) == 7
     assert lines[3] == "  layout: window, tile 516 px, 3x1 per sheet"
     assert lines[4] == "  contact sheets: " + ", ".join(sheets)
-    assert lines[5] == ALL_TIMER_LINE.format(threshold="12.0")
+    assert lines[5] == ALL_TIMER_M_LINE.format(m="0.0", threshold="12.0")
     assert "more than 4" not in run.out
     assert manifest()["sheet"]["count"] == 4
 
@@ -2602,14 +2614,17 @@ def test_cli_16_man_10_11_default_block_k_keeps_every_block_frame(monkeypatch, c
 @pytest.mark.spec("CLI-16")
 @pytest.mark.spec("MAN-10")
 @pytest.mark.spec("MAN-11")
-def test_cli_16_man_10_11_block_k_zero_leaves_the_timer_frames(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-24")
+def test_cli_16_man_10_11_24_block_k_zero_leaves_the_timer_frames(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--block-k", "0"], blocky())
     lines = run.out.splitlines()
     assert run.rc == 0
     assert len(lines) == 7
     assert lines[1] == "  20 thumbnails, selected 5/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)"
     assert lines[2] == "  frames: 0.0 first, 3.0 timer, 6.0 timer, 9.0 timer, 9.5 last"
-    assert lines[5] == ALL_TIMER_LINE.format(threshold="12.0")
+    assert lines[5] == ALL_TIMER_M_SUGGEST_LINE.format(
+        m="6.2", threshold="12.0", t="2.0", content=19, t2="2.0", sheets=3
+    )
     assert run.save_frames_calls[0][1] == [0.0, 3.0, 6.0, 9.0, 9.5]
     data = manifest()
     assert len(data["frames"]) == 5
@@ -2815,7 +2830,7 @@ def test_cli_20_23_man_15_range_shifts_every_time_and_fills_the_segments(monkeyp
         "  frames: 10.0 first, 13.0 timer, 16.0 timer, 19.0 timer, 22.0 timer, 24.5 last\n"
         "  layout: window, tile 516 px, 3x3 per sheet\n"
         "  contact sheets: out/sheet-01.jpg\n"
-        + ALL_TIMER_LINE.format(threshold="12.0") + "\n"
+        + ALL_TIMER_M_LINE.format(m="0.0", threshold="12.0") + "\n"
         + MANIFEST_LINE.format(out_dir="out") + "\n"
     )
     assert all(line.startswith("  ") for line in run.out.splitlines()[1:])
@@ -2901,6 +2916,7 @@ def test_man_15_segments_follow_the_segment_flag_over_the_default_range(monkeypa
 
 
 @pytest.mark.spec("CLI-23")
+@pytest.mark.spec("CLI-24")
 def test_cli_23_hint_lines_point_at_the_range_flags(monkeypatch, capsys, tmp_path):
     sheets = [f"out/sheet-{i:02d}.jpg" for i in range(1, 7)]
     run = run_main(
@@ -2909,10 +2925,7 @@ def test_cli_23_hint_lines_point_at_the_range_flags(monkeypatch, capsys, tmp_pat
     lines = run.out.splitlines()
     assert run.rc == 0
     assert lines[5] == "  6 contact sheets are more than 4; consider --max-frames or --from/--to"
-    assert lines[6] == (
-        "  all frames taken by the timer: the threshold contributed nothing (effective 12.0); "
-        "try --max-frames, --block-k or --from/--to"
-    )
+    assert lines[6] == ALL_TIMER_M_LINE.format(m="0.0", threshold="12.0")
 
 
 @pytest.mark.spec("CLI-23")
@@ -2933,7 +2946,7 @@ def test_cli_23_range_line_comes_second_and_shifts_the_warning_lines(monkeypatch
     assert lines[4] == "  layout: window, tile 516 px, 3x1 per sheet"
     assert lines[5] == "  contact sheets: " + ", ".join(sheets)
     assert lines[6] == MANY_SHEETS_LINE.format(n=6)
-    assert lines[7] == ALL_TIMER_LINE.format(threshold="12.0")
+    assert lines[7] == ALL_TIMER_M_LINE.format(m="0.0", threshold="12.0")
     assert lines[8] == MANIFEST_LINE.format(out_dir="out")
 
 
@@ -3388,7 +3401,8 @@ def test_cli_23_19_timer_line_prints_under_dry_run_after_the_layout_line(monkeyp
 
 
 @pytest.mark.spec("CLI-23")
-def test_cli_23_static_long_recording_says_no_cap_adds_content(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-24")
+def test_cli_23_24_static_long_recording_says_no_cap_adds_content(monkeypatch, capsys, tmp_path):
     sheets = [f"out/sheet-{i:02d}.jpg" for i in range(1, 4)]
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(240), probe=(125.0, 800, 600), sheets=sheets)
     assert run.rc == 0
@@ -3446,7 +3460,8 @@ def test_cli_23_timer_line_prints_with_a_share_under_0_7(monkeypatch, capsys, tm
 
 @pytest.mark.spec("CLI-23")
 @pytest.mark.spec("MAN-15")
-def test_cli_23_man_15_alternating_input_prints_both_lines(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-24")
+def test_cli_23_man_15_24_alternating_input_prints_both_lines(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], alt(30))
     assert run.rc == 0
     assert run.out == (
@@ -3503,3 +3518,106 @@ def test_cli_23_no_timer_line_when_the_cap_was_not_active(monkeypatch, capsys, t
     data = manifest()
     assert list(data["analysis"]) == ANALYSIS_KEYS
     assert data["analysis"]["timer_share"] == 1.0
+
+
+# ---------------------------------------------------------------- Step 10: the all-timer line names --threshold (draft)
+
+
+@pytest.mark.spec("CLI-24")
+def test_cli_24_names_a_threshold_when_a_small_change_exists(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], steps(4, 8))
+    lines = run.out.splitlines()
+    assert run.rc == 0
+    assert len(lines) == 7
+    assert lines[2] == "  frames: 0.0 first, 3.0 timer, 6.0 timer, 9.0 timer, 12.0 timer, 14.5 last"
+    assert lines[5] == ALL_TIMER_M_SUGGEST_LINE.format(
+        m="4.0", threshold="12.0", t="1.3", content=2, t2="1.3", sheets=1
+    )
+    data = manifest()
+    assert list(data["analysis"]) == ANALYSIS_KEYS
+    assert data["analysis"]["all_timer"] is True
+    assert data["analysis"]["threshold"] == {"requested": 12.0, "effective": 12.0}
+    assert [f["reason"] for f in data["frames"]] == ["first", "timer", "timer", "timer", "timer", "last"]
+
+
+@pytest.mark.spec("CLI-24")
+def test_cli_24_m_is_measured_against_the_last_kept_frame_not_consecutive_thumbnails(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], [flat(i // 2) for i in range(30)])
+    lines = run.out.splitlines()
+    assert run.rc == 0
+    assert len(lines) == 7
+    assert lines[2] == "  frames: 0.0 first, 3.0 timer, 6.0 timer, 9.0 timer, 12.0 timer, 14.5 last"
+    assert lines[5] == ALL_TIMER_M_SUGGEST_LINE.format(
+        m="3.0", threshold="12.0", t="1.0", content=7, t2="1.0", sheets=1
+    )
+    data = manifest()
+    assert list(data["analysis"]) == ANALYSIS_KEYS
+    assert data["analysis"]["all_timer"] is True
+    assert data["analysis"]["threshold"] == {"requested": 12.0, "effective": 12.0}
+    assert [f["reason"] for f in data["frames"]] == ["first", "timer", "timer", "timer", "timer", "last"]
+
+
+@pytest.mark.spec("CLI-24")
+def test_cli_24_suggested_threshold_ignores_the_requested_one(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--threshold", "30"], steps(4, 8))
+    lines = run.out.splitlines()
+    assert run.rc == 0
+    assert lines[5] == ALL_TIMER_M_SUGGEST_LINE.format(
+        m="4.0", threshold="30.0", t="1.3", content=2, t2="1.3", sheets=1
+    )
+
+
+@pytest.mark.spec("CLI-24")
+def test_cli_24_t_is_floored_then_raised_to_the_1_0_floor(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], [flat(0)] * 10 + [flat(2)] * 20)
+    lines = run.out.splitlines()
+    assert run.rc == 0
+    assert lines[5] == ALL_TIMER_M_SUGGEST_LINE.format(
+        m="2.0", threshold="12.0", t="1.0", content=1, t2="1.0", sheets=1
+    )
+
+
+@pytest.mark.spec("CLI-24")
+def test_cli_24_second_form_when_m_is_not_above_1_0(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], [flat(0)] * 10 + [flat(1)] * 20)
+    lines = run.out.splitlines()
+    assert run.rc == 0
+    assert lines[5] == ALL_TIMER_M_LINE.format(m="1.0", threshold="12.0")
+    assert "--threshold" not in lines[5]
+
+
+@pytest.mark.spec("CLI-24")
+def test_cli_24_block_k_zero_long_recording_suggested_threshold_the_cap_then_rejects(monkeypatch, capsys, tmp_path):
+    sheets = ["out/sheet-01.jpg", "out/sheet-02.jpg"]
+    run = run_main(
+        monkeypatch,
+        capsys,
+        tmp_path,
+        ["clip.mp4", "out", "--block-k", "0"],
+        [flat(0), patch(100)] * 30,
+        probe=(30.0, 800, 600),
+        sheets=sheets,
+    )
+    assert run.rc == 0
+    assert run.out == (
+        "clip.mp4: 30.0 s, 800x600, landscape\n"
+        "  60 thumbnails, selected 11/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)\n"
+        "  frames: 0.0 first, " + ", ".join("%.1f timer" % t for t in range(3, 28, 3)) + ", 29.5 last\n"
+        "  layout: window, tile 516 px, 3x3 per sheet\n"
+        "  contact sheets: " + ", ".join(sheets) + "\n"
+        + ALL_TIMER_M_SUGGEST_LINE.format(m="6.2", threshold="12.0", t="2.0", content=0, t2="6.8", sheets=2) + "\n"
+        + MANIFEST_LINE.format(out_dir="out") + "\n"
+    )
+
+
+@pytest.mark.spec("CLI-24")
+def test_cli_24_no_line_under_dry_run(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--dry-run"], steps(4, 8))
+    assert run.rc == 0
+    assert "all frames taken by the timer" not in run.out
+    assert run.out.splitlines() == [
+        "clip.mp4: 15.0 s, 800x600, landscape",
+        "  30 thumbnails, selected 6/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)",
+        "  frames: 0.0 first, 3.0 timer, 6.0 timer, 9.0 timer, 12.0 timer, 14.5 last",
+        "  layout: window, tile 516 px, 3x3 per sheet",
+    ]
