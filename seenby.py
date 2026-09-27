@@ -79,8 +79,8 @@ BOX_GAP = 2          # px between a change and the inner edge of its box
 BOX_NEAR = 6         # px, boxes closer than this on both axes are joined
 BOX_SHARE = 0.5      # a joined box covering more of the tile than this is dropped
 BOX_MAX = 12         # a tile with more boxes than this gets none
-BOX_SPREAD = 64      # px changed past PIXEL_T since the frame before that make a change visible
-BOX_STRONG = 4       # px changed past twice PIXEL_T that do the same
+BOX_SPREAD = 24      # px changed past PIXEL_T in 2x2 cells since the frame before that make a change visible
+BOX_STRONG = 5       # px changed past twice PIXEL_T in 2x2 cells that do the same
 _SAMPLES = 'fps=%g:round=up:start_time=0'
 _GLYPHS = {
     '0': '01110 10001 10011 10101 11001 10001 01110', '1': '00100 01100 00100 00100 00100 00100 01110',
@@ -635,12 +635,16 @@ def _blinking(events, samples, gw, fps):
 
 
 def _visible(e, changes, gw):
-    # changed and changed back between two kept frames, or codec noise on text, leaves few and faint pixels
+    # codec noise is faint and scattered over a large area, a real change is dense somewhere
     over, far = changes
-    scale = CELL * CELL / 255.0
-    rows = _rows(e, gw)
-    return (sum(sum(over[r]) for r in rows) * scale >= BOX_SPREAD
-            or sum(sum(far[r]) for r in rows) * scale >= BOX_STRONG)
+    x0, x1, y0, y1 = e['x'] // CELL, (e['x'] + e['w']) // CELL, e['y'] // CELL, (e['y'] + e['h']) // CELL
+    spread, strong = BOX_SPREAD * 255 / (CELL * CELL), BOX_STRONG * 255 / (CELL * CELL)
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            block = [r * gw + c for r in range(y, min(y + 2, y1)) for c in range(x, min(x + 2, x1))]
+            if sum(over[i] for i in block) >= spread or sum(far[i] for i in block) >= strong:
+                return True
+    return False
 
 
 def select_events(samples, gw, gh, budget, fps=EVENT_FPS):
@@ -1000,10 +1004,12 @@ def _run_events(args, out_dir, start, end, ranged, duration, width, height):
             changes = kept_changes(args.video, points, width, height, EVENT_FPS, start, length)
             regions = [[] for _ in points]
             for e in events:
-                i = bisect.bisect_left(points, e['settled'])
-                first = 0 < i < len(points) and points[i] <= e['until']
-                if first and _visible(e, changes[i], gw):
-                    regions[i].append([e['x'], e['y'], e['w'], e['h']])
+                for i in range(max(1, bisect.bisect_left(points, e['start'])), len(points)):
+                    if points[i] > e['until']:
+                        break
+                    if _visible(e, changes[i], gw):
+                        regions[i].append([e['x'], e['y'], e['w'], e['h']])
+                        break
             tile_height = (tile_width * height + width // 2) // width
             boxes = [change_boxes(r, width, tile_width, tile_height) for r in regions]
             sheets = contact_sheets(paths, out_dir, cols, rows, boxes)

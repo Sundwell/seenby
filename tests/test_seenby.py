@@ -6102,7 +6102,7 @@ TWO_CHANGES = [None, (CAB, Z), (CA, Z)]
 
 
 @pytest.mark.spec("BOX-3")
-@pytest.mark.parametrize("name, value", [("BOX_SPREAD", 64), ("BOX_STRONG", 4)])
+@pytest.mark.parametrize("name, value", [("BOX_SPREAD", 24), ("BOX_STRONG", 5)])
 def test_box_3_constants_have_the_spec_values(name, value):
     assert getattr(seenby, name) == value
 
@@ -6162,19 +6162,22 @@ def test_box_3_boxes_per_frame(monkeypatch, capsys, tmp_path, extra, probe, chan
 @pytest.mark.parametrize(
     "changes, boxes",
     [
-        ([None, (grid({(2, 2): 255}), Z), (Z, Z)], [[], [(11, 11, 34, 34)], []]),
-        ([None, (grid({(2, 2): 254}), Z), (Z, Z)], [[], [], []]),
-        ([None, (Z, grid({(4, 4): 16})), (Z, Z)], [[], [(11, 11, 34, 34)], []]),
-        ([None, (Z, grid({(4, 4): 15})), (Z, Z)], [[], [], []]),
+        ([None, (grid({(2, 2): 96}), Z), (Z, Z)], [[], [(11, 11, 34, 34)], []]),
+        ([None, (grid({(2, 2): 95}), Z), (Z, Z)], [[], [], []]),
+        ([None, (Z, grid({(4, 4): 20})), (Z, Z)], [[], [(11, 11, 34, 34)], []]),
+        ([None, (Z, grid({(4, 4): 19})), (Z, Z)], [[], [], []]),
+        ([None, (grid({(2, 2): 48, (3, 3): 48}), Z), (Z, Z)], [[], [(11, 11, 34, 34)], []]),
+        ([None, (grid({(2, 2): 48, (4, 2): 48}), Z), (Z, Z)], [[], [], []]),
         ([None, (grid({(5, 2): 255, (1, 4): 255, (3, 5): 255}), Z), (Z, Z)], [[], [], []]),
     ],
     ids=[
-        "over-255-is-64-px-boxed", "over-254-is-63.75-px-no-box",
-        "far-16-is-4.0157-px-boxed", "far-15-is-3.7647-px-no-box",
+        "over-96-is-24.09-px-in-one-block-boxed", "over-95-is-23.84-px-no-box",
+        "far-20-in-the-last-cell-alone-is-5.02-px-boxed", "far-19-is-4.77-px-no-box",
+        "cells-2-2-and-3-3-share-a-block-boxed", "cells-2-2-and-4-2-share-no-block-no-box",
         "cells-right-left-and-under-A-no-box",
     ],
 )
-def test_box_3_a_box_needs_box_spread_px_past_pixel_t_or_box_strong_px_past_twice_it(
+def test_box_3_a_box_needs_box_spread_px_past_pixel_t_or_box_strong_px_past_twice_it_in_a_block(
     monkeypatch, capsys, tmp_path, changes, boxes
 ):
     run = run_main(
@@ -6182,6 +6185,27 @@ def test_box_3_a_box_needs_box_spread_px_past_pixel_t_or_box_strong_px_past_twic
         probe=EVENTS_PROBE, samples=events_two(), as_given=True, changes=changes,
     )
     assert run.rc == 0
+    assert run.contact_sheets_boxes == [boxes]
+
+
+@pytest.mark.spec("BOX-3")
+@pytest.mark.parametrize(
+    "changes, boxes",
+    [
+        ([None, (CA, Z), (Z, Z)], [[], [(11, 11, 34, 34)], []]),
+        ([None, (Z, Z), (CA, Z)], [[], [], [(11, 11, 34, 34)]]),
+    ],
+    ids=["state-frame-at-1-shows-it-before-it-settles-at-2", "nothing-visible-at-1-so-the-last-frame"],
+)
+def test_box_3_an_event_goes_to_the_first_frame_from_start_on_that_shows_it(
+    monkeypatch, capsys, tmp_path, changes, boxes
+):
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(4),
+        probe=EVENTS_PROBE, samples=events_dbl(), as_given=True, changes=changes,
+    )
+    assert run.rc == 0
+    assert run.kept_changes_calls == [("clip.mp4", [0, 1, 4], 160, 80, 4, 0.0, None)]
     assert run.contact_sheets_boxes == [boxes]
 
 
