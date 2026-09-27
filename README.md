@@ -63,14 +63,15 @@ The console says what happened and does not hide a bad outcome:
 
 ```
 demo.mp4: 27.1 s, 814x872, portrait
-  54 thumbnails, selected 12/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)
-  frames: 0.0 first, 3.0 timer, 3.5 block, 6.5 timer, 9.5 timer, 11.0 block, ..., 26.5 last
+  54 thumbnails, selected 19/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)
+  frames: 0.0 first, 3.0 timer, 3.5 block, 6.5 timer, 9.5 timer, 11.0 block, ..., 25.5 timer, 26.5 last
+  quiet stretches at a lower threshold: 12.0-26.5 s at 3.4 (largest change 10.3)
   layout: window, tile 516 px, 3x2 per sheet
-  contact sheets: demo-frames/sheet-01.jpg, demo-frames/sheet-02.jpg
+  contact sheets: demo-frames/sheet-01.jpg, demo-frames/sheet-02.jpg, demo-frames/sheet-03.jpg, demo-frames/sheet-04.jpg
   manifest: demo-frames/frames.json. Sheets are for meaning; read digits from the native frame, see "recheck" in the manifest.
 ```
 
-When every frame was taken by the timer, a line says so. If the frame cap was not what raised the threshold, the line gives the largest change between thumbnails and what a lower `--threshold` would keep. On a 2560-pixel light web page with a light DevTools pane the largest change was 4.4, the default 12 could not fire anywhere, and `--threshold 1.4` kept every event. Exit codes: 0 done, 1 could not run (one line on stderr, no traceback), 2 bad arguments.
+The `quiet stretches` line says where seenby lowered the threshold on its own (see "Pale screens" below). When every frame was still taken by the timer, a line says so. If the frame cap was not what raised the threshold, the line gives the largest change between thumbnails and what a lower `--threshold` would keep. Exit codes: 0 done, 1 could not run (one line on stderr, no traceback), 2 bad arguments.
 
 ## frames.json
 
@@ -83,17 +84,18 @@ When every frame was taken by the timer, a line says so. If the frame cap was no
                "threshold": {"requested": 12.0, "effective": 12.0},
                "max_gap": {"requested": 3.0, "effective": 3.0}, "block_k": 5.0,
                "block_active": true, "range": {"from": 0.0, "to": 27.1}, "segment": 120.0,
-               "all_timer": false, "timer_share": 0.7},
-  "sheet": {"cols": 3, "rows": 2, "tile_width": 516, "sheet_width": 1568, "count": 2},
+               "all_timer": false, "timer_share": 0.24,
+               "quiet": [{"from": 12.0, "to": 26.5, "largest": 10.3, "threshold": 3.4}]},
+  "sheet": {"cols": 3, "rows": 2, "tile_width": 516, "sheet_width": 1568, "count": 4},
   "frames": [
     {"n": 1, "time": 0.0, "file": "frame-01-0.0s.jpg", "sheet": 1, "reason": "first", "diff": 0.0, "block": 0.0,
      "recheck": "ffmpeg -ss 0.000 -i demo.mp4 -frames:v 1 -q:v 2 demo-frames/frame-01-native.jpg"},
-    {"n": 3, "time": 3.5, "file": "frame-03-3.5s.jpg", "sheet": 1, "reason": "block", "diff": 6.9, "block": 77.1,
+    {"n": 3, "time": 3.5, "file": "frame-03-3.5s.jpg", "sheet": 1, "reason": "block", "diff": 7.8, "block": 70.5,
      "recheck": "..."}
   ],
-  "sheets": [{"file": "sheet-01.jpg", "frames": [1, 6]}, {"file": "sheet-02.jpg", "frames": [7, 12]}],
-  "segments": [{"n": 1, "from": 0.0, "to": 27.1, "frames": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                "activity": 4.3}]
+  "sheets": [{"file": "sheet-01.jpg", "frames": [1, 6]}, {"file": "sheet-02.jpg", "frames": [7, 12]},
+             {"file": "sheet-03.jpg", "frames": [13, 18]}, {"file": "sheet-04.jpg", "frames": [19, 19]}],
+  "segments": [{"n": 1, "from": 0.0, "to": 27.1, "frames": [1, 2, 3, ..., 19], "activity": 3.2}]
 }
 ```
 
@@ -102,7 +104,7 @@ frames among those the selection loop chose; `block_active` says whether the blo
 effective threshold. `reason` is why the frame was kept: `first`, `diff` (mean difference above the threshold),
 `block` (one 8x8 block of the thumbnail changed strongly), `timer` (forced after `max_gap` seconds), `last`.
 `segments` index the frames by stretches of `--segment` seconds, with `activity` (mean change between consecutive
-thumbnails, 0 to 255) per stretch, so a reader of a long recording knows where to zoom in.
+thumbnails, 0 to 255) per stretch, so a reader of a long recording knows where to zoom in. `quiet` lists the stretches judged at a lower threshold of their own, with the largest change found there.
 
 **Reading rule.** Sheets are for meaning. A number read off a tile once came out as 118 instead of 218. For
 digits, run the frame's `recheck` command and read the native frame.
@@ -123,6 +125,7 @@ or the manifest tells you why.
 | `--segment S` | 120 | length of the `segments` index in `frames.json` |
 | `--sheet-width PX` | 1568 | longest side of a contact sheet |
 | `--rows N`, `--tile-width PX` | as many rows as fit, tile by aspect ratio | override the grid |
+| `--selector events` | `legacy` | pick frames from changed pixels at native resolution instead of 32x32 thumbnails, see below |
 | `--dry-run` | | print the selected times and the layout, extract nothing |
 | `--force` | | overwrite an output directory that holds `frame-*.jpg` from something else |
 
@@ -137,6 +140,26 @@ out of 24 into 18. The console still says when the cap was binding: `block rule 
 255, and `N of M frames by the timer` with what `--max-frames 48` and `72` would buy, computed on the same
 thumbnails. `segments[].activity` in `frames.json` shows where the picture moved, so a reader can zoom with
 `--from/--to` on the right stretch instead of raising the cap.
+
+**Pale screens.** A light page on a wide screen barely moves the 32x32 thumbnail. On a 2560x1228 recording, DevTools opening over a third of the screen changed it by 3.6 of 255; on the demo shop, going from the cart to the checkout form changed it by 2.5, both under the default threshold 12. Where the timer alone kept at least three frames in a row between two other frames, or every frame between the first and the last (as on a short recording), seenby looks at that stretch again with a threshold of a third of the largest change inside it, never below 1.0, as long as the result fits the cap; the console and `analysis.quiet` say so. Measured on 18 recordings, it changed the 7 with such stretches (the pale recording went from 0 to 9 frames kept for a change, with the frame showing the reported bug among them; two short recordings went from 3 to 6 frames) and left the other 11 byte for byte. It does not run when the cap was binding; narrow a long recording with `--from/--to` first.
+
+## The events selector (`--selector events`)
+
+The default selector decides with one number, the mean grey difference of two 32x32 thumbnails of the whole frame. That number is the changed share of the frame times the contrast, so it misses exactly the changes a UI bug report is about: a 16 px checkbox on a wide window scores 0.06 against a threshold of 12, a page change on a light site 2.5. `--selector events` measures changes where they happen instead. ffmpeg compares every pixel's luma with the previous sample, four per second, and counts the pixels that moved by more than 24 in 8x8 px cells. Changed cells group into areas; two alike pointer-sized areas and nothing else are the pointer moving. Changes of one screen area are one event, visible from the moment it settles until the next change of that area. seenby keeps the fewest frames that show every event's settled state, plus the first and the last, up to `--max-frames`. There is no timer: a stretch where nothing but the pointer moved gets no frame.
+
+    python3 seenby.py recording.mp4 --selector events
+
+```
+demo.mp4: 27.1 s, 814x872, portrait
+  109 samples at 4 per second, 106 changes, 16 pointer moves, selected 24/24
+  frames: 0.00 first, 0.50 change, 1.50 change, 3.25 change, ..., 26.50 change, 27.00 last
+  ignored a blinking area at 120,608 8x32 px (4 times from 2.00 to 3.50 s): a text caret, or a small mark toggled back and forth
+  layout: window, tile 516 px, 3x2 per sheet
+```
+
+Here every change fit in 24 frames. When they do not fit the cap, a line under the frames says how many were not shown, how many frames all of them would need, and which stretch to rerun with `--from/--to`, for example `151 of 272 changes not shown within 24 frames (all of them would need 131); 36 of them from 0.50 to 26.50 s: rerun with --from 0.00 --to 27.50` on a 20 minute concatenation of test recordings. When nothing changed, a line says so and counts the pointer-like moves (a radio button's dot jumping between options looks like the pointer). A one-cell-wide spot that keeps flipping between the same two looks, a text caret, is ignored and named with the stretch it blinked in; it does not cut short the text typed next to it, and a pointer move in the same moment still counts as the pointer. A 2 px caret that straddles two cells, and a terminal's block cursor, are still counted as changes. The top-level `events` in `frames.json` lists every change found with its `region` in native pixels and whether a kept frame shows it. Frame reasons are `first`, `change` (a settled state), `state` (a short state inside a quick series, shown when the cap has room), `during` and `fill` (inside a long continuous change such as a scroll), `last`. Each frame's `recheck` extracts the very frame that was analysed; `--threshold`, `--max-gap`, `--block-k` and `--sample-fps` belong to the default selector and are refused with this one.
+
+Measured on 15 real recordings with ground truth labeled by two independent agents and an adjudicator: the default selector showed 74% of the key events and 63% of all UI changes, the events selector 92% and 88%. Agents who answered 125 questions about these recordings from the output alone scored 80.0% with the default selector and 94.4% with the events selector (a blind judge, two readers per output), with 10 confidently wrong answers against 1. The weak spot is a dense recording, many changes a second for half a minute: then the cap binds and a frame every 0.5 s without a cap does better; rerun such a stretch with `--from/--to`. It takes about twice as long as the default selector on long recordings (18.3 s against 9.2 s on 20 minutes of 720p, 170 MB against 138 MB of memory), because it decodes the range a second time to extract exactly the frames it analysed. It passes frames through with `-fps_mode` on ffmpeg 5.1 and newer and with `-vsync` before that (9.0 removed `-vsync`); it was run with 4.4.1, 5.0.1, 6.1.1 and 9.0.2, and on 13 recordings it picked the same frames with each, except that 9.0.2 decoded one more sample at the end of one recording.
 
 ## Speech: seenby_report.py
 

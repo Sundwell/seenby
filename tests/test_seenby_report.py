@@ -95,9 +95,9 @@ LOUD = (-53.7, -31.3)
 SILENT = (-91.0, -91.0)
 
 
-def manifest_with(*changes):
-    """Deep copy of MANIFEST with `("dotted.path", value)` changes applied."""
-    result = copy.deepcopy(MANIFEST)
+def manifest_with(*changes, base=MANIFEST):
+    """Deep copy of `base` with `("dotted.path", value)` changes applied."""
+    result = copy.deepcopy(base)
     for path, value in changes:
         target = result
         *parents, leaf = path.split(".")
@@ -431,6 +431,7 @@ def test_rpt_5_blank_stderr_gives_the_exit_line_alone(monkeypatch, capsys, tmp_p
 
 @pytest.mark.spec("RPT-6")
 @pytest.mark.spec("RPT-16")
+@pytest.mark.spec("RPT-19")
 def test_rpt_6_16_core_stdout_is_printed_first_and_the_report_line_last(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"])
     assert run.rc == 0
@@ -677,6 +678,7 @@ def test_rpt_15_shaky_threshold():
 
 
 @pytest.mark.spec("RPT-15")
+@pytest.mark.spec("RPT-18")
 def test_rpt_15_silent_report_text_is_exact():
     assert report_module().render(MANIFEST, None, SILENT, None) == REPORT_SILENT
 
@@ -846,3 +848,122 @@ def test_rpt_11_16_missing_faster_whisper_returns_one_and_leaves_the_core_files(
     assert "pip install -r requirements-whisper.txt" in run.err
     assert not os.path.exists(os.path.join("out", "report.md"))
     assert snapshot("out") == run.core_files
+
+
+# ---------------------------------------------------------------- RPT-18, RPT-19 (draft) events selector manifests
+
+
+def without_diff_and_block(frame, **changes):
+    return {key: value for key, value in frame.items() if key not in ("diff", "block")} | changes
+
+
+EVENTS = manifest_with(
+    (
+        "analysis",
+        {
+            "selector": "events",
+            "sample_fps": 4,
+            "samples": 7,
+            "cell": 8,
+            "pixel_threshold": 24,
+            "max_frames": 24,
+            "range": {"from": 0.0, "to": 15.0},
+            "segment": 120.0,
+            "changes": 3,
+            "shown": 2,
+            "pointer_moves": 1,
+            "blinking": [],
+        },
+    ),
+    (
+        "frames",
+        [
+            without_diff_and_block(F1),
+            without_diff_and_block(F2, time=1.25, reason="change"),
+            without_diff_and_block(F3),
+        ],
+    ),
+)
+EVENTS_LINE = "Events selector: 3 changes found, 2 shown on the frames, 1 pointer moves."
+EVENTS_HEADINGS = ["### 01 - 0.00 s (first)", "### 02 - 1.25 s (change)", "### 03 - 12.00 s (last)"]
+NOT_SHOWN_LINE = (
+    '1 of 3 changes are on none of the frames; the entries of "events" in frames.json with "shown": false '
+    "give their times and regions, rerun seenby with --from/--to around them."
+)
+
+
+@pytest.mark.spec("RPT-18")
+def test_rpt_18_events_line_follows_the_header_and_headings_have_two_decimals():
+    text = report_module().render(EVENTS, None, SILENT, None)
+    lines = text.splitlines()
+    assert lines[2] == HEADER
+    assert lines[3] == EVENTS_LINE
+    assert [line for line in lines if line.startswith("### ")] == EVENTS_HEADINGS
+    assert "All frames were taken by the timer" not in text
+
+
+@pytest.mark.spec("RPT-18")
+@pytest.mark.spec("RPT-20")
+def test_rpt_18_20_events_report_differs_from_rpt_15_in_the_amended_places_only():
+    expected = text_of(
+        [TITLE, "", HEADER, EVENTS_LINE, NOT_SHOWN_LINE, AUDIO_SILENT, "", SHEETS, "", "## Frames", ""]
+        + [EVENTS_HEADINGS[0], "", EVENTS_HEADINGS[1], "", EVENTS_HEADINGS[2], ""]
+        + READING_RULE
+    )
+    assert report_module().render(EVENTS, None, SILENT, None) == expected
+
+
+@pytest.mark.spec("RPT-18")
+@pytest.mark.spec("RPT-20")
+def test_rpt_18_range_line_comes_before_the_events_line():
+    manifest = manifest_with(("analysis.range.from", 1.0), base=EVENTS)
+    lines = report_module().render(manifest, None, SILENT, None).splitlines()
+    assert lines[2] == HEADER
+    assert lines[3] == "Range 1.0-15.0 s."
+    assert lines[4] == EVENTS_LINE
+    assert lines[5] == NOT_SHOWN_LINE
+    assert lines[6] == AUDIO_SILENT
+
+
+@pytest.mark.spec("RPT-20")
+def test_rpt_20_blinking_lines_then_the_not_shown_line_follow_the_events_line():
+    blinking = [
+        {"region": [40, 16, 8, 32], "count": 5, "from": 0.25, "to": 2.25},
+        {"region": [100, 60, 8, 24], "count": 4, "from": 3.0, "to": 4.5},
+    ]
+    e2 = manifest_with(("analysis.blinking", blinking), base=EVENTS)
+    lines = report_module().render(e2, None, SILENT, None).splitlines()
+    at = lines.index(EVENTS_LINE)
+    assert lines[at + 1:at + 4] == [
+        "Ignored a blinking area at 40,16 8x32 px, 5 times from 0.25 to 2.25 s: "
+        "a text caret, or a small mark toggled back and forth.",
+        "Ignored a blinking area at 100,60 8x24 px, 4 times from 3.00 to 4.50 s: "
+        "a text caret, or a small mark toggled back and forth.",
+        NOT_SHOWN_LINE,
+    ]
+    assert lines[at + 4] == AUDIO_SILENT
+
+
+@pytest.mark.spec("RPT-20")
+def test_rpt_20_nothing_is_added_when_every_change_is_shown():
+    text = report_module().render(manifest_with(("analysis.shown", 3), base=EVENTS), None, SILENT, None)
+    lines = text.splitlines()
+    at = lines.index("Events selector: 3 changes found, 3 shown on the frames, 1 pointer moves.")
+    assert lines[at + 1] == AUDIO_SILENT
+    assert "Ignored" not in text
+    assert "on none of the frames" not in text
+
+
+@pytest.mark.spec("RPT-19")
+@pytest.mark.parametrize("before", [None, stale_report], ids=["no-earlier-report", "earlier-report"])
+def test_rpt_19_render_failure_propagates_and_leaves_no_report(monkeypatch, capsys, tmp_path, before):
+    rpt = report_module()
+
+    def failing_render(manifest, speech, audio, model_info):
+        raise KeyError("x")
+
+    monkeypatch.setattr(rpt, "render", failing_render)
+    with pytest.raises(KeyError) as exc:
+        run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], manifest=EVENTS, before=before)
+    assert exc.value.args == ("x",)
+    assert not (tmp_path / "out" / "report.md").exists()

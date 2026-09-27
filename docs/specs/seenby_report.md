@@ -287,3 +287,29 @@ RPT-17 (amends RPT-15, the "All frames were taken by the timer" sentence only) W
 | RPT-17 | `render(MANIFEST with analysis.all_timer true, None, (-91.0, -91.0), None)` (threshold 12.0 -> 12.0, gap 3.0 -> 3.0) | contains `All frames were taken by the timer; the threshold contributed nothing (effective 12.0). The seenby.py console output says whether a lower --threshold would keep more.` and not `Try` |
 | RPT-17 | `render(MANIFEST with analysis.all_timer true and max_gap.effective 5.0, None, (-91.0, -91.0), None)` (threshold 12.0 -> 12.0) | contains `All frames were taken by the timer; the threshold contributed nothing (effective 12.0). Try --max-frames, --block-k or --from/--to.` |
 | RPT-17, RPT-15 | the RPT-15 row with `threshold.effective` 205.0 | unchanged |
+
+## Amendment 2026-09-27: manifests of the events selector (implemented 2026-09-27)
+
+Why. `seenby_report.py` forwards options it does not know to the core, so `--selector events` reaches `seenby.py`, whose manifest then has no `all_timer`, no `threshold` and frames without `diff` and `block` (seenby spec, MAN-17). `render` raised `KeyError: 'all_timer'` and left a 0-byte `report.md`, because the file was opened before the text existed (found in review, 2026-09-27).
+
+RPT-18 (amends RPT-15) When `manifest["analysis"]["selector"]` is `"events"`, `render` differs from RPT-15 in three places and nowhere else (RPT-20 adds a fourth, the blinking and not-shown lines). The all-timer sentence is never written. Right after the header line (and the Range line when there is one) comes `Events selector: <analysis.changes> changes found, <analysis.shown> shown on the frames, <analysis.pointer_moves> pointer moves.` Every frame heading is `### <n %02d> - <time %.2f> s (<reason>)`. A manifest without `analysis.selector` renders exactly as before.
+
+RPT-19 (amends RPT-16) `main()` builds the text with `render` first and writes `report.md` only after `render` returned; when `render` raises, no `report.md` exists (the one removed at the start, RPT-4, is not recreated).
+
+| ID | Input | Result |
+|---|---|---|
+| RPT-18 | `render(EVENTS, None, (-91.0, -91.0), None)` where `EVENTS` is the RPT-15 `MANIFEST` with `analysis` replaced by `{"selector": "events", "sample_fps": 4, "samples": 7, "cell": 8, "pixel_threshold": 24, "max_frames": 24, "range": {"from": 0.0, "to": <video.duration>}, "segment": 120.0, "changes": 3, "shown": 2, "pointer_moves": 1, "blinking": []}` and the frames F1, F2, F3 without `diff` and `block`, F2 with `time` 1.25 and `reason` `change` | contains `Events selector: 3 changes found, 2 shown on the frames, 1 pointer moves.` right after the header line; frame headings exactly `### 01 - 0.00 s (first)`, `### 02 - 1.25 s (change)`, `### 03 - 12.00 s (last)`; no `All frames were taken by the timer` |
+| RPT-18 | the same with `analysis.range.from` 1.0 | the Range line, then the Events selector line |
+| RPT-19 | `main()` with the fakes of the RPT-16 rows, the fake core writing the `EVENTS` manifest, `render` replaced by a function that raises `KeyError('x')` | `report.md` does not exist afterwards; the exception propagates (nothing catches it) |
+| RPT-19 | the RPT-16 success row | unchanged: `report.md` written, `  report: <out_dir>/report.md` printed last |
+
+## Amendment 2026-09-27, re-review: blinking areas and changes not shown (implemented 2026-09-27)
+
+Why. The core prints a line per blinking area it ignored and a line with the changes no frame shows, but `report.md` carried neither, so an agent reading only the report did not learn that a spot on screen was left out or that some changes are on no frame (re-review of step 12, N12).
+
+RPT-20 (amends RPT-18) Right after the `Events selector:` line, `render` writes one line per entry of `analysis.blinking`, in order, `Ignored a blinking area at <x>,<y> <w>x<h> px, <count> times from <from %.2f> to <to %.2f> s: a text caret, or a small mark toggled back and forth.` (final review: it said "such as a text caret", as the core console did) (`x`, `y`, `w`, `h` from `region`), and then, when `analysis.shown` is less than `analysis.changes`, `<changes - shown> of <changes> changes are on none of the frames; the entries of "events" in frames.json with "shown": false give their times and regions, rerun seenby with --from/--to around them.` Nothing else changes.
+
+| ID | Input | Result |
+|---|---|---|
+| RPT-20 | `render(E2, None, (-91.0, -91.0), None)` where `E2` is the RPT-18 `EVENTS` with `analysis.blinking` `[{"region": [40, 16, 8, 32], "count": 5, "from": 0.25, "to": 2.25}, {"region": [100, 60, 8, 24], "count": 4, "from": 3.0, "to": 4.5}]` | the three lines right after `Events selector: 3 changes found, 2 shown on the frames, 1 pointer moves.` are exactly `Ignored a blinking area at 40,16 8x32 px, 5 times from 0.25 to 2.25 s: a text caret, or a small mark toggled back and forth.`, `Ignored a blinking area at 100,60 8x24 px, 4 times from 3.00 to 4.50 s: a text caret, or a small mark toggled back and forth.` and `1 of 3 changes are on none of the frames; the entries of "events" in frames.json with "shown": false give their times and regions, rerun seenby with --from/--to around them.` |
+| RPT-20 | `EVENTS` with `analysis.shown` 3 (and `blinking` `[]`) | the line after the Events selector line is the Audio line: no Ignored line, no "on none of the frames" line |

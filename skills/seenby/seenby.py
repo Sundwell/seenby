@@ -28,11 +28,13 @@ Exit codes: 0 done, 1 could not run, 2 bad arguments.
 """
 
 import argparse
+import bisect
 import functools
 import json
 import math
 import operator
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -50,6 +52,28 @@ SHEET_WIDTH = 1568   # vision models downscale to about this many px on the long
 MARGIN = 6           # tile filter: border around the sheet, px
 PADDING = 4          # tile filter: gap between tiles, px
 VERSION = 1          # frames.json contract; consumers check it
+EVENT_FPS = 4        # samples per second of the events selector
+CELL = 8             # side of the grid cells, native px
+PIXEL_T = 24         # per-pixel luma change that counts
+MIN_CELL = 8         # a cell with at least this share (of 255) of changed pixels is active
+NOISE_PX = 12        # blobs with fewer changed pixels are codec noise
+GLOBAL_SHARE = 0.25  # above this share of active cells the whole frame is one blob
+POINTER_BOX = 64     # the pointer fits in this box, px
+POINTER_DIM = 8      # px the two places of a moved pointer may differ in width or height
+POINTER_PX = 0.45    # share of pixels they may differ in
+REGION_MARGIN = 16   # px around an event's box that still continue it
+LONG_S = 2.0         # a change longer than this gets a frame every LONG_S inside it
+INNER_WEIGHT = 0.8   # weight of those frames against the change's own
+GLOBAL_WEIGHT = 4.0  # added to the weight of a whole-frame change
+EPISODE_S = 5.0      # changes further apart than this are separate bursts, each owed a frame
+SPREAD = 0.5         # over the cap, favour frames far from those already chosen
+FILL_MIN_S = 0.5     # no two frames added inside a long change closer than this
+HOLD_DELTA = 6       # cell-mean levels that still count as the same look
+HOLD_SHARE = 0.25    # share of an event's cells that may differ before its state counts as gone
+BLINK_REPEATS = 4    # a one-cell-wide spot flipping between two looks this often, briefly, is a blinking caret
+CARET_H = 64         # px, the tallest box such a spot may have
+_SAMPLES = 'fps=%g:round=up:start_time=0'
+_ACTIVE = bytes(1 if v >= MIN_CELL else 0 for v in range(256))
 
 
 def ffmpeg():
@@ -71,6 +95,13 @@ def require_tools():
 def ffmpeg_version():
     out = subprocess.run([ffmpeg(), '-version'], capture_output=True, text=True, check=True).stdout
     return out.splitlines()[0] if out else ''
+
+
+def passthrough(version):
+    """The option that passes every frame through for ffmpeg of this `-version` line: 9.0 removed -vsync, 5.1 added
+    -fps_mode."""
+    m = re.match(r'ffmpeg version n?(\d+)\.(\d+)', version)
+    return '-vsync' if m and (int(m.group(1)), int(m.group(2))) < (5, 1) else '-fps_mode'
 
 
 def parse_probe(text):
@@ -147,19 +178,32 @@ def _block_max(a, b, bs):
     return best
 
 
-def select_frames(thumbs, threshold, max_gap, block_k=BLOCK_K, sample_fps=SAMPLE_FPS):
-    """Kept thumbnails as {time, diff, block, reason}, both measured against the last kept one."""
+def select_frames(thumbs, threshold, max_gap, block_k=BLOCK_K, sample_fps=SAMPLE_FPS, quiet=()):
+    """Kept thumbnails as {time, diff, block, reason}, both measured against the last kept one.
+
+    A thumbnail after the start of a quiet stretch and up to its end is judged by
+    that stretch's threshold.
+    """
     frames = []
     last = None
     last_time = -1e9
-    bar = block_k * threshold
+    limits = None
+    if quiet:
+        limits = [threshold] * len(thumbs)
+        for s in reversed(quiet):
+            for i in range(max(0, math.floor(s['from'] * sample_fps)),
+                           min(len(thumbs), math.ceil(s['to'] * sample_fps) + 1)):
+                if s['from'] < i / sample_fps <= s['to']:
+                    limits[i] = s['threshold']
     for i, thumb in enumerate(thumbs):
         t = i / sample_fps
+        limit = limits[i] if limits else threshold
+        bar = block_k * limit
         diff = 0.0 if last is None else _difference(thumb, last)
         block = None
         if last is None:
             reason = 'first'
-        elif diff > threshold:
+        elif diff > limit:
             reason = 'diff'
         elif block_k > 0 and bar < 255 and (block := block_max(thumb, last)) > bar:
             reason = 'block'
@@ -188,6 +232,34 @@ def select_frames(thumbs, threshold, max_gap, block_k=BLOCK_K, sample_fps=SAMPLE
 def select(thumbs, threshold, max_gap, block_k=BLOCK_K, sample_fps=SAMPLE_FPS):
     """Return the timestamps whose frame differs from the last kept frame."""
     return [f['time'] for f in select_frames(thumbs, threshold, max_gap, block_k, sample_fps)]
+
+
+def quiet_stretches(thumbs, threshold, max_gap, max_frames, block_k=BLOCK_K, sample_fps=SAMPLE_FPS):
+    """Runs of timer frames, each with a threshold of its own, as many as fit the cap.
+
+    On a light screen a page change can move the thumbnail by 2 to 4 of 255, under
+    the default threshold, and only the timer keeps frames there. A run needs at least
+    3 timer frames, unless it runs from the first frame to the last.
+    """
+    frames = select_frames(thumbs, threshold, max_gap, block_k, sample_fps)
+    index = [round(f['time'] * sample_fps) for f in frames]
+    ends = [k for k, f in enumerate(frames) if f['reason'] != 'timer' or k == len(frames) - 1]
+    stretches = []
+    for a, b in zip(ends, ends[1:]):
+        if b - a - 1 < 3 and not (a == 0 and b == len(frames) - 1):
+            continue
+        kept = set(index[a:b])
+        largest, last = 0.0, thumbs[index[a]]
+        for i in range(index[a] + 1, index[b]):
+            largest = max(largest, _difference(thumbs[i], last))
+            if i in kept:
+                last = thumbs[i]
+        if largest > 1.0:
+            stretches.append({'from': frames[a]['time'], 'to': frames[b]['time'], 'timer': b - a - 1,
+                              'largest': largest, 'threshold': max(1.0, math.floor(largest * 10 / 3) / 10)})
+    while stretches and len(select_frames(thumbs, threshold, max_gap, block_k, sample_fps, stretches)) > max_frames:
+        stretches.remove(min(stretches, key=lambda s: (s['timer'], -s['from'])))
+    return stretches
 
 
 def fit_to_cap(thumbs, max_frames, threshold, max_gap, block_k=BLOCK_K, sample_fps=SAMPLE_FPS):
@@ -248,6 +320,371 @@ def activity(thumbs, start, end, length, sample_fps=SAMPLE_FPS):
         pairs = [_difference(thumbs[a - 1], thumbs[b - 1]) for a, b in zip(idx, idx[1:])]
         out.append(round(sum(pairs) / len(pairs), 2) if pairs else 0.0)
     return out
+
+
+def display_size(path, width, height):
+    """(width, height) as shown: swapped when the stream carries a rotation of 90 or 270 degrees."""
+    out = subprocess.run([ffprobe(), '-v', 'error', '-select_streams', 'v:0', '-show_entries',
+                          'stream_side_data=rotation:stream_tags=rotate', '-of', 'csv=p=0', path],
+                         capture_output=True, text=True).stdout
+    for word in out.replace(',', ' ').split():
+        try:
+            if abs(round(float(word))) % 180 == 90:
+                return height, width
+        except ValueError:
+            pass
+    return width, height
+
+
+def change_grids(path, width, height, fps=EVENT_FPS, start=0.0, length=None):
+    """Cell grids of a recording: per sample the cell means and the share of pixels changed since the previous one."""
+    cw, ch = width // CELL * CELL, height // CELL * CELL
+    gw, gh = cw // CELL, ch // CELL
+    pool = 'scale=%d:%d:flags=area+accurate_rnd' % (gw, gh)
+    graph = ("[0:v]" + _SAMPLES + ",format=pix_fmts=yuv420p|yuvj420p|yuv422p|yuvj422p|yuv444p|yuvj444p|gray,"
+             "extractplanes=y,setrange=full,crop=%d:%d:0:0,split[a][b];[a]%s[m];"
+             "[b]tblend=all_mode=difference,lut=c0='if(gt(val,%d),255,0)',%s[d]") % (fps, cw, ch, pool, PIXEL_T, pool)
+    span = [] if length is None else ['-t', '%.3f' % length]
+    keep = [passthrough(ffmpeg_version()), 'passthrough']
+    # two outputs, not one vstack: the stacked pairing of means and differences shifted with the input
+    with tempfile.TemporaryDirectory() as tmp:
+        means, diffs = os.path.join(tmp, 'means'), os.path.join(tmp, 'diffs')
+        subprocess.run([ffmpeg(), '-v', 'error', '-ss', '%.3f' % start] + span + ['-i', path, '-filter_complex', graph,
+                        '-map', '[m]'] + keep + ['-pix_fmt', 'gray', '-f', 'rawvideo', means,
+                        '-map', '[d]'] + keep + ['-pix_fmt', 'gray', '-f', 'rawvideo', diffs],
+                       capture_output=True, check=True)
+        with open(means, 'rb') as f:
+            m = f.read()
+        with open(diffs, 'rb') as f:
+            d = f.read()
+    n = gw * gh
+    m, d = memoryview(m), memoryview(d)
+    m = [m[i:i + n] for i in range(0, len(m) - n + 1, n)]
+    d = [d[i:i + n] for i in range(0, len(d) - n + 1, n)]
+    if len(d) == len(m):
+        d = d[1:]
+    return gw, gh, [(mean, change) for mean, change in zip(m, [bytes(n)] + d)]
+
+
+def blobs(change, gw, gh, cell=CELL):
+    """Changed areas of one sample in native pixels, or one blob for the whole frame when most of it changed."""
+    mask = bytes(change).translate(_ACTIVE)
+    active = [i for m in re.finditer(rb'\x01+', mask) for i in range(m.start(), m.end())]
+    scale = cell * cell / 255.0
+    if len(active) > GLOBAL_SHARE * gw * gh:
+        return [{'px': sum(change) * scale, 'x': 0, 'y': 0, 'w': gw * cell, 'h': gh * cell, 'global': True}]
+    left = set(active)
+    out = []
+    for c in active:
+        if c not in left:
+            continue
+        left.discard(c)
+        stack, cells = [c], []
+        while stack:
+            i = stack.pop()
+            cells.append(i)
+            y, x = divmod(i, gw)
+            for yy in range(max(0, y - 2), min(gh, y + 3)):
+                for xx in range(max(0, x - 2), min(gw, x + 3)):
+                    j = yy * gw + xx
+                    if j in left:
+                        left.discard(j)
+                        stack.append(j)
+        px = sum(change[i] for i in cells) * scale
+        if px < NOISE_PX:
+            continue
+        xs = [i % gw for i in cells]
+        ys = [i // gw for i in cells]
+        out.append({'px': px, 'x': min(xs) * cell, 'y': min(ys) * cell, 'w': (max(xs) - min(xs) + 1) * cell,
+                    'h': (max(ys) - min(ys) + 1) * cell, 'global': False})
+    return out
+
+
+def pointer(bs):
+    """Two alike pointer-sized blobs and nothing else: the pointer moved, the screen did not change."""
+    if len(bs) != 2:
+        return False
+    a, b = bs
+    if a['global'] or b['global'] or max(a['w'], a['h'], b['w'], b['h']) > POINTER_BOX:
+        return False
+    return (abs(a['w'] - b['w']) <= POINTER_DIM and abs(a['h'] - b['h']) <= POINTER_DIM
+            and abs(a['px'] - b['px']) <= POINTER_PX * max(a['px'], b['px']))
+
+
+def _overlaps(a, b, m):
+    return (a['x'] - m < b['x'] + b['w'] and b['x'] - m < a['x'] + a['w']
+            and a['y'] - m < b['y'] + b['h'] and b['y'] - m < a['y'] + a['h'])
+
+
+def _inside(a, b):
+    return (b['x'] <= a['x'] and a['x'] + a['w'] <= b['x'] + b['w']
+            and b['y'] <= a['y'] and a['y'] + a['h'] <= b['y'] + b['h'])
+
+
+def _absorb(e, o):
+    x0, y0 = min(e['x'], o['x']), min(e['y'], o['y'])
+    x1, y1 = max(e['x'] + e['w'], o['x'] + o['w']), max(e['y'] + e['h'], o['y'] + o['h'])
+    e.update({'x': x0, 'y': y0, 'w': x1 - x0, 'h': y1 - y0, 'px': e['px'] + o['px'],
+              'global': e['global'] or o['global']})
+    if 'start' in o:
+        e['start'] = min(e['start'], o['start'])
+
+
+def events_of(content, joined=True):
+    """Changes grouped by screen area, each with the samples its final state stays on screen."""
+    events, open_ = [], []
+    for k in range(1, len(content)):
+        open_ = [e for e in open_ if e['end'] >= (k - 1 if joined else k)]
+        for c in content[k]:
+            hit = [e for e in open_ if _overlaps(e, c, REGION_MARGIN)]
+            if not hit:
+                e = dict(c, start=k, end=k)
+                open_.append(e)
+                events.append(e)
+                continue
+            e = hit[0]
+            for o in hit[1:]:
+                _absorb(e, o)
+                open_.remove(o)
+                events.remove(o)
+            _absorb(e, c)
+            e['end'] = k
+    last = len(content) - 1
+    for e in events:
+        e['settled'] = e['end']
+        e['until'] = next((k - 1 for k in range(e['end'] + 1, len(content))
+                           if any(_overlaps(e, c, 0) for c in content[k])), last)
+        e['weight'] = math.log1p(e['px']) + (GLOBAL_WEIGHT if e['global'] else 0.0)
+    return events
+
+
+def pick(windows, budget, last, fps=EVENT_FPS):
+    """Samples that show every window, or within the budget the weightiest spread over the recording."""
+    points = []
+    for a, b, _ in sorted(windows, key=lambda w: (w[1], w[0])):
+        if not points or points[-1] < a:
+            points.append(b)
+    points = sorted(set(points) | {0, last})
+    if len(points) <= budget:
+        return points
+    chosen = {0, last}
+    covered = [a <= 0 <= b or a <= last <= b for a, b, _ in windows]
+
+    def take(t):
+        chosen.add(t)
+        for i, (a, b, _) in enumerate(windows):
+            if a <= t <= b:
+                covered[i] = True
+
+    # every burst of activity first: on a 20 minute concatenation the weights alone left two clips without a frame
+    quiet = round(EPISODE_S * fps)
+    order = sorted(range(len(windows)), key=lambda i: windows[i][0])
+    groups = []
+    for i in order:
+        if groups and windows[i][0] - windows[groups[-1][-1]][0] <= quiet:
+            groups[-1].append(i)
+        else:
+            groups.append([i])
+    for g in sorted(groups, key=lambda g: -max(windows[i][2] for i in g)):
+        if len(chosen) >= budget:
+            break
+        if not any(covered[i] for i in g):
+            take(windows[max(g, key=lambda i: (windows[i][2], -windows[i][1]))][1])
+    candidates = sorted({b for _, b, _ in windows})
+    inside = {t: [] for t in candidates}
+    holders = []
+    for i, (a, b, _) in enumerate(windows):
+        holders.append(candidates[bisect.bisect_left(candidates, a):bisect.bisect_right(candidates, b)])
+        for t in holders[i]:
+            inside[t].append(i)
+    gain = {t: sum(windows[i][2] for i in inside[t] if not covered[i]) for t in candidates}
+    while len(chosen) < budget:
+        best = None
+        for t in candidates:
+            if t in chosen or gain[t] <= 0:
+                continue
+            g = gain[t] * (1 + SPREAD * math.log1p(min(abs(t - c) for c in chosen) / fps))
+            if best is None or g > best[0]:
+                best = (g, t)
+        if best is None:
+            break
+        chosen.add(best[1])
+        stale = set()
+        for i in inside[best[1]]:
+            if not covered[i]:
+                covered[i] = True
+                stale.update(holders[i])
+        # recomputed rather than decreased: subtraction leaves a residue that flips exact ties
+        for t in stale:
+            gain[t] = sum(windows[i][2] for i in inside[t] if not covered[i])
+    return sorted(chosen)
+
+
+def fill(points, long_pairs, budget, fps=EVENT_FPS):
+    """Spend what the budget has left inside long continuous changes."""
+    step = round(FILL_MIN_S * fps)
+    points = sorted(points)
+    while len(points) < budget:
+        best = None
+        for a, b in zip(points, points[1:]):
+            inside = [k for k in long_pairs if a < k < b]
+            if b - a < 2 * step or not inside:
+                continue
+            if best is None or len(inside) * (b - a) > best[0]:
+                best = (len(inside) * (b - a), a, b, inside)
+        if best is None:
+            break
+        _, a, b, inside = best
+        k = min(inside, key=lambda k: (abs(k - (a + b) / 2), k))
+        if k - a < step or b - k < step:
+            k = round((a + b) / 2)
+        points = sorted(points + [k])
+    return points
+
+
+def _rows(e, gw, holes=()):
+    x0, x1 = e['x'] // CELL, (e['x'] + e['w']) // CELL
+    out = []
+    for y in range(e['y'] // CELL, (e['y'] + e['h']) // CELL):
+        a = x0
+        for h0, h1 in sorted((h['x'] // CELL, (h['x'] + h['w']) // CELL) for h in holes
+                             if h['y'] // CELL <= y < (h['y'] + h['h']) // CELL):
+            if min(h0, x1) > a:
+                out.append(slice(y * gw + a, y * gw + min(h0, x1)))
+            a = max(a, h1)
+        if a < x1:
+            out.append(slice(y * gw + a, y * gw + x1))
+    return out
+
+
+def _differ(rows, a, b):
+    """True when more than HOLD_SHARE of the cells in `rows` differ by more than HOLD_DELTA between means a and b."""
+    limit = HOLD_SHARE * sum(r.stop - r.start for r in rows)
+    off = 0
+    for r in rows:
+        if a[r] != b[r]:
+            off += sum(1 for p, q in zip(a[r], b[r]) if abs(p - q) > HOLD_DELTA)
+            if off > limit:
+                return True
+    return False
+
+
+def _hold(e, samples, gw, holes=()):
+    # a pale change and its undo can both sit under PIXEL_T; the cell means still show the undo
+    rows = _rows(e, gw, holes)
+    ref = samples[e['settled']][0]
+    for j in range(e['settled'] + 1, e['until'] + 1):
+        if _differ(rows, samples[j][0], ref):
+            e['until'] = j - 1
+            return
+
+
+def _blinking(events, samples, gw, fps):
+    # a text caret blinks for as long as a field has focus: a thin spot flipping between two looks, again and again
+    groups = {}
+    for e in events:
+        groups.setdefault((e['x'], e['y'], e['w'], e['h']), []).append(e)
+    out = []
+    for (x, y, w, h), g in groups.items():
+        if w > CELL or h > CARET_H:
+            continue
+        rows = _rows(g[0], gw)
+        runs, run, looks = [], [], []
+        for e in g:
+            look = samples[e['settled']][0]
+            if e['px'] >= w * h / 2:
+                runs.append(run)
+                run, looks = [], []
+                continue
+            if len(looks) == 2 and all(_differ(rows, look, v) for v in looks):
+                runs.append(run)
+                before = samples[e['start'] - 1][0]
+                known = not all(_differ(rows, before, v) for v in looks)
+                run, looks = [], []
+                if known:
+                    continue
+            elif len(looks) == 1 and not _differ(rows, look, looks[0]):
+                run, looks = [], []
+            run.append(e)
+            if len(looks) < 2:
+                looks.append(look)
+        runs.append(run)
+        for run in runs:
+            if sum(e['until'] - e['settled'] < fps for e in run) >= BLINK_REPEATS:
+                out.append({'x': x, 'y': y, 'w': w, 'h': h, 'count': len(run), 'first': run[0]['settled'],
+                            'last': run[-1]['settled'], 'blinks': run})
+    return out
+
+
+def select_events(samples, gw, gh, budget, fps=EVENT_FPS):
+    """Frames by the events selector, each with its reason, and every change found."""
+    if not samples:
+        return {'frames': [], 'events': [], 'blinking': [], 'pointer_moves': 0, 'needed': 0}
+    last = len(samples) - 1
+    content = [[]]
+    moves = 0
+    for mean, change in samples[1:]:
+        bs = blobs(change, gw, gh)
+        moved = pointer(bs)
+        moves += moved
+        content.append([] if moved else bs)
+    events = events_of(content)
+    for e in events:
+        _hold(e, samples, gw)
+    blinking = _blinking(events, samples, gw, fps)
+    if blinking:
+        strip = {}
+        for b in blinking:
+            for e in b.pop('blinks'):
+                for k in range(e['start'], e['end'] + 1):
+                    strip.setdefault(k, []).append(e)
+        for k, blinks in strip.items():
+            kept = [c for c in content[k] if not any(_inside(c, e) for e in blinks)]
+            if len(kept) < len(content[k]) and pointer(kept):
+                moves += 1
+                kept = []
+            content[k] = kept
+        events = events_of(content)
+        for e in events:
+            _hold(e, samples, gw, [b for b in blinking if b['first'] <= e['until'] and e['settled'] <= b['last']])
+    windows = [(e['settled'], e['until'], e['weight']) for e in events]
+    n = round(LONG_S * fps)
+    long_pairs = set()
+    for e in events:
+        if e['end'] - e['start'] + 1 > n:
+            long_pairs.update(range(e['start'], e['end'] + 1))
+            windows += [(j, j, INNER_WEIGHT * e['weight']) for j in range(e['start'] + n, e['end'], n)]
+    needed = len(pick(windows, len(windows) + 2, last, fps))
+    points = pick(windows, budget, last, fps)
+    filled = set(fill(points, sorted(long_pairs), budget, fps)) - set(points)
+    points = sorted(set(points) | filled)
+    states = set()
+    if len(points) < budget:
+        inner = [s for s in events_of(content, joined=False)
+                 if not any(e['settled'] <= s['settled'] and s['until'] <= e['until'] and _overlaps(e, s, 0)
+                            for e in events)]
+        for s in sorted(inner, key=lambda s: (-s['weight'], s['settled'])):
+            if len(points) >= budget:
+                break
+            if not any(s['settled'] <= t <= s['until'] for t in points):
+                points = sorted(points + [s['until']])
+                states.add(s['until'])
+    frames = []
+    for k in points:
+        if k == 0:
+            reason = 'first'
+        elif k == last:
+            reason = 'last'
+        elif k in states:
+            reason = 'state'
+        elif k in filled:
+            reason = 'fill'
+        elif any(e['settled'] <= k <= e['until'] for e in events):
+            reason = 'change'
+        else:
+            reason = 'during'
+        frames.append((k, reason))
+    return {'frames': frames, 'events': events, 'blinking': blinking, 'pointer_moves': moves, 'needed': needed}
 
 
 def layout(width, height, n_frames, sheet_width=SHEET_WIDTH, rows=None, tile_width=None):
@@ -325,6 +762,29 @@ def save_frames(path, times, out_dir, tile_width):
     return paths
 
 
+def save_samples(path, indices, times, out_dir, tile_width, fps=EVENT_FPS, start=0.0, length=None):
+    """Frames of the given sample indices at tile width, the same frames change_grids analysed."""
+    os.makedirs(out_dir, exist_ok=True)
+    clean(out_dir)
+    span = [] if length is None else ['-t', '%.3f' % length]
+    select = '+'.join('eq(n\\,%d)' % k for k in indices)
+    paths = []
+    # one pass through the same fps chain as change_grids: -ss <time> per frame gave another frame for 65 of 325
+    with tempfile.TemporaryDirectory(dir=out_dir) as tmp:
+        subprocess.run([ffmpeg(), '-v', 'error', '-ss', '%.3f' % start] + span + ['-i', path,
+                        '-vf', (_SAMPLES + ",select='%s',scale=%d:-1") % (fps, select, tile_width),
+                        passthrough(ffmpeg_version()), 'passthrough', '-q:v', '2', os.path.join(tmp, '%03d.jpg')],
+                       capture_output=True, check=True)
+        got = len([f for f in os.listdir(tmp) if f.endswith('.jpg')])
+        if got < len(times):
+            raise ValueError('ffmpeg wrote %d of %d frames' % (got, len(times)))
+        for n, t in enumerate(times, 1):
+            frame = os.path.join(out_dir, 'frame-%02d-%.2fs.jpg' % (n, t))
+            os.replace(os.path.join(tmp, '%03d.jpg' % n), frame)
+            paths.append(frame)
+    return paths
+
+
 def contact_sheets(paths, out_dir, cols, rows):
     """Tile frames into `cols x rows` images: an agent reads each in one go.
 
@@ -354,20 +814,145 @@ def contact_sheets(paths, out_dir, cols, rows):
     return sheets
 
 
+def _run_events(args, out_dir, start, end, ranged, duration, width, height):
+    """main() for --selector events, after the probe and the range checks."""
+    def fail(message):
+        print(message, file=sys.stderr)
+        return 1
+
+    stage = 'grids'
+    try:
+        width, height = display_size(args.video, width, height)
+        if width < CELL or height < CELL:
+            return fail('%s: the frame (%dx%d) is smaller than %dx%d px; use the legacy selector'
+                        % (args.video, width, height, CELL, CELL))
+        length = end - start if ranged else None
+        span = [] if length is None else ['-t', '%.3f' % length]
+        gw, gh, samples = change_grids(args.video, width, height, EVENT_FPS, start, length)
+        if not samples:
+            return fail('could not decode the video: no frames')
+        picked = select_events(samples, gw, gh, args.max_frames)
+        events = picked['events']
+        points = [k for k, _ in picked['frames']]
+        frames = [{'time': start + k / EVENT_FPS, 'reason': reason} for k, reason in picked['frames']]
+        times = [f['time'] for f in frames]
+        shown = [any(e['settled'] <= k <= e['until'] for k in points) for e in events]
+        portrait = height > width
+        grade, tile_width, cols, rows, _ = layout(width, height, len(times), args.sheet_width, args.rows,
+                                                  args.tile_width)
+
+        print('%s: %.1f s, %dx%d, %s' % (os.path.basename(args.video), duration, width, height,
+                                         'portrait' if portrait else 'landscape'))
+        if ranged:
+            print('  range: %.1f-%.1f s' % (start, end))
+        print('  %d samples at %d per second, %d changes, %d pointer moves, selected %d/%d'
+              % (len(samples), EVENT_FPS, len(events), picked['pointer_moves'], len(times), args.max_frames))
+        print('  frames: %s' % ', '.join('%.2f %s' % (f['time'], f['reason']) for f in frames))
+        for b in picked['blinking']:
+            print('  ignored a blinking area at %d,%d %dx%d px (%d times from %.2f to %.2f s): a text caret, '
+                  'or a small mark toggled back and forth'
+                  % (b['x'], b['y'], b['w'], b['h'], b['count'], start + b['first'] / EVENT_FPS,
+                     start + b['last'] / EVENT_FPS))
+        if not events and len(samples) > 1:
+            if picked['pointer_moves']:
+                print('  no change except %d pointer-like moves (the pointer, or a small mark such as a radio dot): '
+                      'the first and the last frame only' % picked['pointer_moves'])
+            else:
+                print('  no change: the first and the last frame only')
+        elif not all(shown):
+            missing = sorted(start + e['settled'] / EVENT_FPS for e, s in zip(events, shown) if not s)
+            runs = [[missing[0]]]
+            for t in missing[1:]:
+                if t - runs[-1][-1] <= 10.0:
+                    runs[-1].append(t)
+                else:
+                    runs.append([t])
+            run = max(runs, key=len)
+            print('  %d of %d changes not shown within %d frames (all of them would need %d); %d of them from %.2f to '
+                  '%.2f s: rerun with --from %.2f --to %.2f'
+                  % (len(missing), len(events), args.max_frames, picked['needed'], len(run), run[0], run[-1],
+                     max(start, run[0] - 1.0), math.floor(min(end, run[-1] + 1.0) * 100 + 1e-6) / 100))
+        print('  layout: %s, tile %d px, %dx%d per sheet' % (grade, tile_width, cols, rows))
+        if args.dry_run:
+            return 0
+
+        stage = 'frames'
+        paths = save_samples(args.video, points, times, out_dir, tile_width, EVENT_FPS, start, length)
+        stage = 'sheets'
+        sheets = contact_sheets(paths, out_dir, cols, rows) if len(paths) > 1 else []
+        stage = 'version'
+        version = ffmpeg_version()
+    except ValueError as e:
+        return fail('%s: %s' % (args.video, e))
+    except subprocess.CalledProcessError as e:
+        err = e.stderr.decode(errors='replace') if isinstance(e.stderr, bytes) else (e.stderr or '')
+        lines = err.strip().splitlines()
+        return fail('ffmpeg failed during %s (exit %d): %s' % (stage, e.returncode, lines[-1] if lines else ''))
+
+    per_sheet = cols * rows
+    settled = [start + e['settled'] / EVENT_FPS for e in events]
+    index = segments(times, start, end, args.segment)
+    for n, entry in enumerate(index):
+        final = n == len(index) - 1
+        entry['activity'] = sum(1 for t in settled
+                                if entry['from'] <= t and (t < entry['to'] or final and t <= entry['to']))
+    manifest = {
+        'tool': 'seenby',
+        'version': VERSION,
+        'ffmpeg': version,
+        'video': {'name': os.path.basename(args.video), 'path': args.video, 'duration': duration,
+                  'width': width, 'height': height, 'ratio': round(width / height, 3),
+                  'orientation': 'portrait' if portrait else 'landscape', 'grade': grade},
+        'analysis': {'selector': 'events', 'sample_fps': EVENT_FPS, 'samples': len(samples), 'cell': CELL,
+                     'pixel_threshold': PIXEL_T, 'max_frames': args.max_frames, 'range': {'from': start, 'to': end},
+                     'segment': args.segment, 'changes': len(events), 'shown': sum(shown),
+                     'pointer_moves': picked['pointer_moves'],
+                     'blinking': [{'region': [b['x'], b['y'], b['w'], b['h']], 'count': b['count'],
+                                   'from': start + b['first'] / EVENT_FPS, 'to': start + b['last'] / EVENT_FPS}
+                                  for b in picked['blinking']]},
+        'sheet': {'cols': cols, 'rows': rows, 'tile_width': tile_width, 'sheet_width': args.sheet_width,
+                  'count': len(sheets)},
+        'frames': [{
+            'n': n, 'time': f['time'], 'file': os.path.basename(path),
+            'sheet': (n - 1) // per_sheet + 1 if len(paths) > 1 else None,
+            'reason': f['reason'],
+            'recheck': shlex.join([ffmpeg(), '-ss', '%.3f' % start] + span
+                                  + ['-i', args.video, '-vf', (_SAMPLES + ',select=eq(n\\,%d)') % (EVENT_FPS, k),
+                                     passthrough(version), 'passthrough', '-frames:v', '1', '-q:v', '2',
+                                     os.path.join(out_dir, 'frame-%02d-native.jpg' % n)]),
+        } for n, (f, k, path) in enumerate(zip(frames, points, paths), 1)],
+        'sheets': [{'file': os.path.basename(sheet), 'frames': [first + 1, min(first + per_sheet, len(paths))]}
+                   for sheet, first in zip(sheets, range(0, len(paths), per_sheet))],
+        'segments': index,
+        'events': [{'from': start + e['start'] / EVENT_FPS, 'settled': start + e['settled'] / EVENT_FPS,
+                    'until': start + e['until'] / EVENT_FPS, 'region': [e['x'], e['y'], e['w'], e['h']],
+                    'changed_px': round(e['px']), 'shown': s} for e, s in zip(events, shown)],
+    }
+    manifest_path = os.path.join(out_dir, 'frames.json')
+    write_json(manifest_path, manifest)
+
+    print('  contact sheets: %s' % ', '.join(sheets or paths))
+    if len(sheets) > 4:
+        print('  %d contact sheets are more than 4; consider --max-frames or --from/--to' % len(sheets))
+    print('  manifest: %s. Sheets are for meaning; read digits from the native frame, '
+          'see "recheck" in the manifest.' % manifest_path)
+    return 0
+
+
 def main():
     p = argparse.ArgumentParser(
         description='Pick the frames of a screen recording for an AI agent: contact sheets plus frames.json')
     p.add_argument('video', help='screen recording in any format ffmpeg reads')
     p.add_argument('out_dir', nargs='?', default=None,
                    help='output directory (default: the video path without extension plus -frames)')
-    p.add_argument('--threshold', type=float, default=THRESHOLD,
+    p.add_argument('--threshold', type=float, default=None,
                    help='mean grey-level difference (0-255) against the last kept frame that keeps a frame '
                         '(default: %.1f)' % THRESHOLD)
-    p.add_argument('--max-gap', type=float, default=MAX_GAP,
+    p.add_argument('--max-gap', type=float, default=None,
                    help='seconds without a kept frame after which one is forced (default: %.1f)' % MAX_GAP)
     p.add_argument('--max-frames', type=int, default=MAX_FRAMES,
                    help='cap on kept frames; raises the threshold, never cuts the tail (default: %d)' % MAX_FRAMES)
-    p.add_argument('--block-k', type=float, default=BLOCK_K,
+    p.add_argument('--block-k', type=float, default=None,
                    help='keep a frame when any %dx%d block of the thumbnail differs by more than this times the '
                         'threshold, even if the mean does not; 0 disables (default: %.1f)' % (BLOCK, BLOCK, BLOCK_K))
     p.add_argument('--sheet-width', type=int, default=SHEET_WIDTH,
@@ -376,7 +961,7 @@ def main():
                    help='rows per contact sheet (default: as many as fit the sheet width)')
     p.add_argument('--tile-width', type=int, default=None,
                    help='tile width, px (default: 256, 516 or 776 by aspect ratio)')
-    p.add_argument('--sample-fps', type=float, default=float(SAMPLE_FPS),
+    p.add_argument('--sample-fps', type=float, default=None,
                    help='thumbnails per second analysed (default: %.1f)' % SAMPLE_FPS)
     p.add_argument('--from', dest='start', type=float, default=None,
                    help='analyse from this second (default: 0)')
@@ -384,11 +969,21 @@ def main():
                    help='analyse up to this second (default: the end of the video)')
     p.add_argument('--segment', type=float, default=120.0,
                    help='length of the index stretches in frames.json, seconds (default: 120)')
+    p.add_argument('--selector', choices=('legacy', 'events'), default='legacy',
+                   help='legacy: 32x32 thumbnails against a threshold, a timer and a cap; events: changed pixels at '
+                        'native resolution, one frame per screen state that changed (default: legacy)')
     p.add_argument('--dry-run', action='store_true',
                    help='print the selected times and the layout, extract nothing')
     p.add_argument('--force', action='store_true',
                    help='overwrite an output directory that holds frame-*.jpg from something else')
     args = p.parse_args()
+    if args.selector == 'events' and any(v is not None for v in (args.threshold, args.max_gap, args.block_k,
+                                                                  args.sample_fps)):
+        p.error('--threshold, --max-gap, --block-k and --sample-fps apply to the legacy selector only')
+    args.threshold = THRESHOLD if args.threshold is None else args.threshold
+    args.max_gap = MAX_GAP if args.max_gap is None else args.max_gap
+    args.block_k = BLOCK_K if args.block_k is None else args.block_k
+    args.sample_fps = float(SAMPLE_FPS) if args.sample_fps is None else args.sample_fps
     if args.max_frames < 2:
         p.error('--max-frames must be at least 2: the first and last frames are always kept')
     if args.threshold <= 0:
@@ -445,14 +1040,19 @@ def main():
         if args.end is not None and args.end > duration:
             return fail('--to %.1f is past the end of the video (%.1f s)' % (args.end, duration))
         end = duration if args.end is None else args.end
+        if args.selector == 'events':
+            return _run_events(args, out_dir, start, end, ranged, duration, width, height)
         stage = 'thumbnails'
         thumbs = thumbnails(args.video, args.sample_fps, start, end - start if ranged else None)
         if not thumbs:
             return fail('could not decode the video: no frames')
         times, threshold, max_gap = fit_to_cap(thumbs, args.max_frames, args.threshold, args.max_gap,
                                                args.block_k, args.sample_fps)
-        frames = select_frames(thumbs, threshold, max_gap, args.block_k, args.sample_fps)
-        times = [t + start for t in times]
+        cap_active = threshold > args.threshold or max_gap > args.max_gap
+        quiet = [] if cap_active else quiet_stretches(thumbs, threshold, max_gap, args.max_frames, args.block_k,
+                                                      args.sample_fps)
+        frames = select_frames(thumbs, threshold, max_gap, args.block_k, args.sample_fps, quiet)
+        times = [f['time'] + start for f in frames]
         for f in frames:
             f['time'] += start
         portrait = height > width
@@ -466,15 +1066,18 @@ def main():
         print('  %d thumbnails, selected %d/%d (threshold %.1f -> %.1f, max gap %.1f -> %.1f s)'
               % (len(thumbs), len(times), args.max_frames, args.threshold, threshold, args.max_gap, max_gap))
         print('  frames: %s' % ', '.join('%.1f %s' % (f['time'], f['reason']) for f in frames))
+        if quiet:
+            print('  quiet stretches at a lower threshold: %s' % '; '.join(
+                '%.1f-%.1f s at %.1f (largest change %.1f)' % (s['from'] + start, s['to'] + start, s['threshold'],
+                                                              s['largest']) for s in quiet))
         print('  layout: %s, tile %d px, %dx%d per sheet' % (grade, tile_width, cols, rows))
         loop = [f for f in frames if f['reason'] in ('diff', 'block', 'timer')]
         timers = sum(f['reason'] == 'timer' for f in loop)
         timer_share = round(timers / len(loop), 2) if loop else 0.0
-        block_active = args.block_k > 0 and args.block_k * threshold < 255
+        block_active = args.block_k > 0 and args.block_k * min([threshold] + [s['threshold'] for s in quiet]) < 255
         if args.block_k > 0 and not block_active:
             print('  block rule inactive: bar %.1f (%.1f x %.1f) is at or above 255'
                   % (args.block_k * threshold, args.block_k, threshold))
-        cap_active = threshold > args.threshold or max_gap > args.max_gap
         if cap_active and len(times) >= 5:
             options = []
             for cap in (2 * args.max_frames, 3 * args.max_frames):
@@ -519,7 +1122,9 @@ def main():
                      'threshold': {'requested': args.threshold, 'effective': threshold},
                      'max_gap': {'requested': args.max_gap, 'effective': max_gap},
                      'block_k': args.block_k, 'block_active': block_active, 'range': {'from': start, 'to': end},
-                     'segment': args.segment, 'all_timer': all_timer, 'timer_share': timer_share},
+                     'segment': args.segment, 'all_timer': all_timer, 'timer_share': timer_share,
+                     'quiet': [{'from': s['from'] + start, 'to': s['to'] + start, 'largest': s['largest'],
+                                'threshold': s['threshold']} for s in quiet]},
         'sheet': {'cols': cols, 'rows': rows, 'tile_width': tile_width, 'sheet_width': args.sheet_width,
                   'count': len(sheets)},
         'frames': [{

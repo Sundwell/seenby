@@ -1,27 +1,57 @@
+BLINK_REPEATS = 4
 BLOCK = 8
 BLOCK_K = 5.0
+CARET_H = 64
+CELL = 8
+EPISODE_S = 5.0
+EVENT_FPS = 4
+FILL_MIN_S = 0.5
+GLOBAL_SHARE = 0.25
+GLOBAL_WEIGHT = 4.0
+HOLD_DELTA = 6
+HOLD_SHARE = 0.25
+INNER_WEIGHT = 0.8
+LONG_S = 2.0
 MARGIN = 6
 MAX_FRAMES = 24
 MAX_GAP = 3.0
+MIN_CELL = 8
+NOISE_PX = 12
 PADDING = 4
+PIXEL_T = 24
+POINTER_BOX = 64
+POINTER_DIM = 8
+POINTER_PX = 0.45
+REGION_MARGIN = 16
 SAMPLE_FPS = 2
 SHEET_WIDTH = 1568
+SPREAD = 0.5
 THRESHOLD = 12.0
 THUMB = 32
 VERSION = 1
 def activity(thumbs, start, end, length, sample_fps=2)
     """Mean difference between consecutive thumbnails, one value per segments() entry."""
+def blobs(change, gw, gh, cell=8)
+    """Changed areas of one sample in native pixels, or one blob for the whole frame when most of it changed."""
 def block_max(a, b, bs=8)
     """Largest mean difference over the bs x bs blocks of two thumbnails."""
+def change_grids(path, width, height, fps=4, start=0.0, length=None)
+    """Cell grids of a recording: per sample the cell means and the share of pixels changed since the previous one."""
 def check_out_dir(out_dir, force)
     """None when the directory is ours to clean, otherwise the refusal to print."""
 def clean(out_dir)
     """Remove our own files from a previous run, leave everything else alone."""
 def contact_sheets(paths, out_dir, cols, rows)
     """Tile frames into `cols x rows` images: an agent reads each in one go."""
+def display_size(path, width, height)
+    """(width, height) as shown: swapped when the stream carries a rotation of 90 or 270 degrees."""
+def events_of(content, joined=True)
+    """Changes grouped by screen area, each with the samples its final state stays on screen."""
 def ffmpeg()
 def ffmpeg_version()
 def ffprobe()
+def fill(points, long_pairs, budget, fps=4)
+    """Spend what the budget has left inside long continuous changes."""
 def fit_to_cap(thumbs, max_frames, threshold, max_gap, block_k=5.0, sample_fps=2)
     """Raise the threshold until the frames fit the cap. Never cut the tail."""
 def layout(width, height, n_frames, sheet_width=1568, rows=None, tile_width=None)
@@ -29,16 +59,28 @@ def layout(width, height, n_frames, sheet_width=1568, rows=None, tile_width=None
 def main()
 def parse_probe(text)
     """(duration, width, height) from ffprobe's csv output, ValueError when any is missing."""
+def passthrough(version)
+    """The option that passes every frame through for ffmpeg of this `-version` line: 9.0 removed -vsync, 5.1 added"""
+def pick(windows, budget, last, fps=4)
+    """Samples that show every window, or within the budget the weightiest spread over the recording."""
+def pointer(bs)
+    """Two alike pointer-sized blobs and nothing else: the pointer moved, the screen did not change."""
 def probe(path)
     """Duration and orientation: the contact sheet layout depends on it."""
+def quiet_stretches(thumbs, threshold, max_gap, max_frames, block_k=5.0, sample_fps=2)
+    """Runs of timer frames, each with a threshold of its own, as many as fit the cap."""
 def require_tools()
     """None when ffmpeg and ffprobe are runnable, otherwise the message to print."""
 def save_frames(path, times, out_dir, tile_width)
+def save_samples(path, indices, times, out_dir, tile_width, fps=4, start=0.0, length=None)
+    """Frames of the given sample indices at tile width, the same frames change_grids analysed."""
 def segments(times, start, end, length)
     """Index of the kept times by stretches of `length` seconds over [start, end]."""
 def select(thumbs, threshold, max_gap, block_k=5.0, sample_fps=2)
     """Return the timestamps whose frame differs from the last kept frame."""
-def select_frames(thumbs, threshold, max_gap, block_k=5.0, sample_fps=2)
+def select_events(samples, gw, gh, budget, fps=4)
+    """Frames by the events selector, each with its reason, and every change found."""
+def select_frames(thumbs, threshold, max_gap, block_k=5.0, sample_fps=2, quiet=())
     """Kept thumbnails as {time, diff, block, reason}, both measured against the last kept one."""
 def thumbnails(path, sample_fps=2, start=0.0, length=None)
     """Grey THUMB x THUMB thumbnails, sample_fps per second, as one raw stream."""

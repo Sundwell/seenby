@@ -158,7 +158,17 @@ def render(manifest, speech, audio, model_info):
     rng = analysis['range']
     if rng['from'] > 0 or rng['to'] < video['duration']:
         out.append('Range %.1f-%.1f s.' % (rng['from'], rng['to']))
-    if analysis['all_timer']:
+    if analysis.get('selector') == 'events':
+        out.append('Events selector: %d changes found, %d shown on the frames, %d pointer moves.' % (
+            analysis['changes'], analysis['shown'], analysis['pointer_moves']))
+        for b in analysis['blinking']:
+            out.append('Ignored a blinking area at %d,%d %dx%d px, %d times from %.2f to %.2f s: a text caret, '
+                       'or a small mark toggled back and forth.' % (*b['region'], b['count'], b['from'], b['to']))
+        if analysis['shown'] < analysis['changes']:
+            out.append('%d of %d changes are on none of the frames; the entries of "events" in frames.json with '
+                       '"shown": false give their times and regions, rerun seenby with --from/--to around them.'
+                       % (analysis['changes'] - analysis['shown'], analysis['changes']))
+    elif analysis['all_timer']:
         capped = (analysis['threshold']['effective'] != analysis['threshold']['requested']
                   or analysis['max_gap']['effective'] != analysis['max_gap']['requested'])
         out.append('All frames were taken by the timer; the threshold contributed nothing (effective %.1f). %s' % (
@@ -183,7 +193,9 @@ def render(manifest, speech, audio, model_info):
     out += ['', '## Frames']
     for frame, interval in zip(frames, frame_intervals(frames, rng['to'])):
         out.append('')
-        if frame['reason'] == 'first':
+        if analysis.get('selector') == 'events':
+            out.append('### %02d - %.2f s (%s)' % (frame['n'], frame['time'], frame['reason']))
+        elif frame['reason'] == 'first':
             out.append('### %02d - %.1f s (%s)' % (frame['n'], frame['time'], frame['reason']))
         else:
             out.append('### %02d - %.1f s (%s, diff %.1f, block %.1f)' % (
@@ -236,8 +248,9 @@ def main():
         except ImportError as error:
             print(error, file=sys.stderr)
             return 1
+    text = render(manifest, speech, audio, info)
     with open(report, 'w', encoding='utf-8') as f:
-        f.write(render(manifest, speech, audio, info))
+        f.write(text)
     print('  report: %s' % report)
     return 0
 

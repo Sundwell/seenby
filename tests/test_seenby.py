@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import random
 import shlex
 import subprocess
 import sys
@@ -43,7 +44,7 @@ def last_time(thumbs):
     return (len(thumbs) - 1) / FPS
 
 
-def grid(cells):
+def thumb_grid(cells):
     """Thumbnail from a set of (row, col, value) cells, everything else 0."""
     pixels = bytearray(SIZE)
     for row, col, value in cells:
@@ -52,15 +53,15 @@ def grid(cells):
 
 
 def patch(v):
-    return grid((r, c, v) for r in range(8) for c in range(8))
+    return thumb_grid((r, c, v) for r in range(8) for c in range(8))
 
 
 def straddle(v):
-    return grid((r, c, v) for r in range(8) for c in range(4, 12))
+    return thumb_grid((r, c, v) for r in range(8) for c in range(4, 12))
 
 
 def pixel(v):
-    return grid([(0, 0, v)])
+    return thumb_grid([(0, 0, v)])
 
 
 def blocky():
@@ -1404,13 +1405,23 @@ class Run:
     """Fakes for the ffmpeg-facing functions, recording the calls main() makes.
 
     `probe`, `thumbs`, `frames` and `sheets` are returned by the matching fake, or raised when they are
-    exceptions. `watch` is a path whose existence is recorded at the moment each fake is called.
+    exceptions. `change_grids` returns `(20, 10, samples)`, or raises `samples` when it is an exception.
+    `save_samples` returns `frames` like `save_frames`, one path per index when `frames` is None.
+    `display_size` returns `(width, height)` unchanged, or `display` when given (raised when it is an exception).
+    `ffmpeg_version` returns `version`.
+    `watch` is a path whose existence is recorded at the moment each fake is called.
     """
 
-    def __init__(self, monkeypatch, probe, thumbs, frames, sheets, tools, watch):
+    def __init__(
+        self, monkeypatch, probe, thumbs, frames, sheets, tools, watch, samples=None, display=None,
+        version=FFMPEG_VERSION_LINE,
+    ):
         self.probe_calls = []
         self.thumbnails_calls = []
+        self.display_size_calls = []
+        self.change_grids_calls = []
         self.save_frames_calls = []
+        self.save_samples_calls = []
         self.contact_sheets_calls = []
         self.ffmpeg_version_calls = 0
         self.watched = {}
@@ -1429,11 +1440,32 @@ class Run:
             self.thumbnails_calls.append((path, sample_fps, start, length))
             return outcome(thumbs)
 
+        def fake_display_size(path, width, height):
+            note("display_size")
+            self.display_size_calls.append((path, width, height))
+            if display is None:
+                return (width, height)
+            return outcome(display)
+
+        def fake_change_grids(path, width, height, fps=4, start=0.0, length=None):
+            note("change_grids")
+            self.change_grids_calls.append((path, width, height, fps, start, length))
+            if isinstance(samples, BaseException):
+                raise samples
+            return (20, 10, samples)
+
         def fake_save_frames(path, times, out_dir, tile_width):
             note("save_frames")
             self.save_frames_calls.append((path, times, out_dir, tile_width))
             if frames is None:
                 return [f"{out_dir}/frame-{i:02d}.jpg" for i in range(1, len(times) + 1)]
+            return outcome(frames)
+
+        def fake_save_samples(path, indices, times, out_dir, tile_width, fps=4, start=0.0, length=None):
+            note("save_samples")
+            self.save_samples_calls.append((path, indices, times, out_dir, tile_width, fps, start, length))
+            if frames is None:
+                return [f"{out_dir}/frame-{i:02d}.jpg" for i in range(1, len(indices) + 1)]
             return outcome(frames)
 
         def fake_contact_sheets(paths, out_dir, cols, rows):
@@ -1448,11 +1480,14 @@ class Run:
 
         def fake_ffmpeg_version():
             self.ffmpeg_version_calls += 1
-            return FFMPEG_VERSION_LINE
+            return version
 
         monkeypatch.setattr(seenby, "probe", fake_probe)
         monkeypatch.setattr(seenby, "thumbnails", fake_thumbnails)
+        monkeypatch.setattr(seenby, "display_size", fake_display_size, raising=False)
+        monkeypatch.setattr(seenby, "change_grids", fake_change_grids, raising=False)
         monkeypatch.setattr(seenby, "save_frames", fake_save_frames)
+        monkeypatch.setattr(seenby, "save_samples", fake_save_samples, raising=False)
         monkeypatch.setattr(seenby, "contact_sheets", fake_contact_sheets)
         monkeypatch.setattr(seenby, "require_tools", fake_require_tools)
         monkeypatch.setattr(seenby, "ffmpeg_version", fake_ffmpeg_version)
@@ -1470,13 +1505,16 @@ def run_main(
     tools=None,
     video_exists=True,
     watch=None,
+    samples=None,
+    display=None,
+    version=FFMPEG_VERSION_LINE,
 ):
     monkeypatch.chdir(tmp_path)
     if video_exists:
         video = tmp_path / argv[0]
         video.parent.mkdir(parents=True, exist_ok=True)
         video.write_bytes(b"")
-    run = Run(monkeypatch, probe, thumbs, frames, sheets, tools, watch)
+    run = Run(monkeypatch, probe, thumbs, frames, sheets, tools, watch, samples, display, version)
     monkeypatch.setattr(sys, "argv", ["seenby.py"] + argv)
     run.rc = seenby.main()
     captured = capsys.readouterr()
@@ -1499,7 +1537,7 @@ def recheck(video, out_dir, n, time):
 FRAME_KEYS = ["n", "time", "file", "sheet", "reason", "diff", "block", "recheck"]
 ANALYSIS_KEYS = [
     "sample_fps", "thumbnails", "max_frames", "threshold", "max_gap", "block_k", "block_active", "range", "segment",
-    "all_timer", "timer_share",
+    "all_timer", "timer_share", "quiet",
 ]
 SEGMENT_KEYS = ["n", "from", "to", "frames", "activity"]
 TOP_LEVEL_KEYS = ["tool", "version", "ffmpeg", "video", "analysis", "sheet", "frames", "sheets", "segments"]
@@ -1551,6 +1589,7 @@ def static_30_manifest():
             "segment": 120.0,
             "all_timer": True,
             "timer_share": 1.0,
+            "quiet": [],
         },
         "sheet": {"cols": 3, "rows": 3, "tile_width": 516, "sheet_width": 1568, "count": 1},
         "frames": [
@@ -2419,6 +2458,7 @@ def test_man_4_10_11_15_analysis_block_carries_requested_and_effective_values(mo
         "segment": 120.0,
         "all_timer": True,
         "timer_share": 1.0,
+        "quiet": [],
     }
     assert [f["time"] for f in data["frames"]] == [0.0, 3.0, 6.0, 9.0, 9.5]
     assert [f["reason"] for f in data["frames"]] == ["first", "timer", "timer", "timer", "last"]
@@ -2614,28 +2654,32 @@ def test_cli_16_man_10_11_default_block_k_keeps_every_block_frame(monkeypatch, c
 @pytest.mark.spec("CLI-16")
 @pytest.mark.spec("MAN-10")
 @pytest.mark.spec("MAN-11")
-@pytest.mark.spec("CLI-24")
-def test_cli_16_man_10_11_24_block_k_zero_leaves_the_timer_frames(monkeypatch, capsys, tmp_path):
-    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--block-k", "0"], blocky())
+@pytest.mark.spec("CLI-25")
+@pytest.mark.spec("MAN-16")
+def test_cli_16_man_10_11_25_block_k_zero_finds_a_quiet_stretch(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--block-k", "0"], blocky(), probe=(10.0, 800, 600))
     lines = run.out.splitlines()
     assert run.rc == 0
     assert len(lines) == 7
-    assert lines[1] == "  20 thumbnails, selected 5/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)"
-    assert lines[2] == "  frames: 0.0 first, 3.0 timer, 6.0 timer, 9.0 timer, 9.5 last"
-    assert lines[5] == ALL_TIMER_M_SUGGEST_LINE.format(
-        m="6.2", threshold="12.0", t="2.0", content=19, t2="2.0", sheets=3
-    )
-    assert run.save_frames_calls[0][1] == [0.0, 3.0, 6.0, 9.0, 9.5]
+    assert lines[0] == "clip.mp4: 10.0 s, 800x600, landscape"
+    assert lines[1] == "  20 thumbnails, selected 20/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)"
+    assert lines[2] == "  frames: 0.0 first, " + ", ".join("%.1f diff" % (i / 2) for i in range(1, 20))
+    assert lines[3] == quiet_line([{"from": 0.0, "to": 9.5, "threshold": 2.0, "largest": 6.25}])
+    assert "all frames taken by the timer" not in run.out
+    assert run.save_frames_calls[0][1] == [i / 2 for i in range(20)]
     data = manifest()
-    assert len(data["frames"]) == 5
+    assert len(data["frames"]) == 20
     assert data["analysis"]["block_k"] == 0.0
-    assert data["frames"][4]["time"] == 9.5
-    assert data["frames"][4]["diff"] == 6.25
-    assert data["frames"][4]["block"] == 100.0
-    assert data["frames"][4]["reason"] == "last"
-    assert data["frames"][1]["time"] == 3.0
-    assert data["frames"][1]["block"] == 0.0
-    assert data["analysis"]["all_timer"] is True
+    assert data["analysis"]["quiet"] == [{"from": 0.0, "to": 9.5, "largest": 6.25, "threshold": 2.0}]
+    assert data["frames"][1]["time"] == 0.5
+    assert data["frames"][1]["reason"] == "diff"
+    assert data["frames"][1]["diff"] == 6.25
+    assert data["frames"][1]["block"] == 100.0
+    assert data["frames"][-1]["time"] == 9.5
+    assert data["frames"][-1]["reason"] == "diff"
+    assert data["frames"][-1]["diff"] == 6.25
+    assert data["frames"][-1]["block"] == 100.0
+    assert data["analysis"]["all_timer"] is False
 
 
 @pytest.mark.spec("CLI-16")
@@ -2672,14 +2716,23 @@ def test_man_10_15_key_order_in_analysis_and_frame_entries(monkeypatch, capsys, 
 
 
 @pytest.mark.spec("MAN-10")
+@pytest.mark.spec("CLI-25")
 def test_man_10_frame_block_is_the_block_max_against_the_previous_kept(monkeypatch, capsys, tmp_path):
-    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], [flat(0), straddle(100), flat(0), flat(0)])
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], [flat(0), straddle(100), flat(0), flat(0)],
+        probe=(2.0, 800, 600),
+    )
+    lines = run.out.splitlines()
     assert run.rc == 0
+    assert lines[2] == "  frames: 0.0 first, 0.5 diff, 1.0 diff, 1.5 last"
+    assert lines[3] == quiet_line([{"from": 0.0, "to": 1.5, "threshold": 2.0, "largest": 6.25}])
     frames = manifest()["frames"]
-    assert [f["time"] for f in frames] == [0.0, 1.5]
-    assert frames[1]["diff"] == 0.0
-    assert frames[1]["block"] == 0.0
-    assert frames[1]["reason"] == "last"
+    assert [f["time"] for f in frames] == [0.0, 0.5, 1.0, 1.5]
+    assert frames[1]["diff"] == 6.25
+    assert frames[1]["block"] == 50.0
+    assert frames[3]["diff"] == 0.0
+    assert frames[3]["block"] == 0.0
+    assert frames[3]["reason"] == "last"
     second = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out2"], [flat(0), straddle(100)])
     assert second.rc == 0
     frames = manifest("out2")["frames"]
@@ -2690,6 +2743,8 @@ def test_man_10_frame_block_is_the_block_max_against_the_previous_kept(monkeypat
 
 
 @pytest.mark.spec("MAN-11")
+@pytest.mark.spec("CLI-25")
+@pytest.mark.spec("MAN-16")
 def test_man_11_one_block_frame_among_timers_turns_all_timer_off(monkeypatch, capsys, tmp_path):
     thumbs = static(11) + [patch(100)] + static(18)
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], thumbs)
@@ -2700,14 +2755,20 @@ def test_man_11_one_block_frame_among_timers_turns_all_timer_off(monkeypatch, ca
     assert [f["reason"] for f in data["frames"]] == ["first", "timer", "block", "block", "timer", "timer", "last"]
     assert [f["block"] for f in data["frames"]] == [0.0, 0.0, 100.0, 100.0, 0.0, 0.0, 0.0]
     assert data["analysis"]["all_timer"] is False
+    assert data["analysis"]["quiet"] == []
     assert len(lines) == 6
+
     off = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out2", "--block-k", "0"], thumbs)
     lines = off.out.splitlines()
     assert off.rc == 0
     data = manifest("out2")
-    assert [f["time"] for f in data["frames"]] == [0.0, 3.0, 6.0, 9.0, 12.0, 14.5]
-    assert [f["reason"] for f in data["frames"]] == ["first", "timer", "timer", "timer", "timer", "last"]
-    assert data["analysis"]["all_timer"] is True
+    assert [f["time"] for f in data["frames"]] == [0.0, 3.0, 5.5, 6.0, 9.0, 12.0, 14.5]
+    assert [f["reason"] for f in data["frames"]] == ["first", "timer", "diff", "diff", "timer", "timer", "last"]
+    assert lines[2] == "  frames: 0.0 first, 3.0 timer, 5.5 diff, 6.0 diff, 9.0 timer, 12.0 timer, 14.5 last"
+    assert lines[3] == quiet_line([{"from": 0.0, "to": 14.5, "threshold": 2.0, "largest": 6.25}])
+    assert "all frames taken by the timer" not in off.out
+    assert data["analysis"]["all_timer"] is False
+    assert data["analysis"]["quiet"] == [{"from": 0.0, "to": 14.5, "largest": 6.25, "threshold": 2.0}]
     assert len(lines) == 7
 
 
@@ -3379,6 +3440,7 @@ def test_cli_23_man_15_long_ramp_names_what_a_bigger_cap_buys(monkeypatch, capsy
     assert data["analysis"]["timer_share"] == 0.81
     assert data["analysis"]["block_active"] is True
     assert data["analysis"]["all_timer"] is False
+    assert data["analysis"]["quiet"] == []
     assert data["sheets"] == [
         {"file": "sheet-01.jpg", "frames": [1, 9]},
         {"file": "sheet-02.jpg", "frames": [10, 18]},
@@ -3420,6 +3482,7 @@ def test_cli_23_24_static_long_recording_says_no_cap_adds_content(monkeypatch, c
     assert data["analysis"]["max_gap"] == {"requested": 3.0, "effective": 5.859375}
     assert data["analysis"]["timer_share"] == 1.0
     assert data["analysis"]["all_timer"] is True
+    assert data["analysis"]["quiet"] == []
 
 
 @pytest.mark.spec("CLI-23")
@@ -3478,6 +3541,7 @@ def test_cli_23_man_15_24_alternating_input_prints_both_lines(monkeypatch, capsy
     data = manifest()
     assert data["analysis"]["timer_share"] == 1.0
     assert data["analysis"]["block_active"] is False
+    assert data["analysis"]["quiet"] == []
 
 
 @pytest.mark.spec("CLI-23")
@@ -3524,70 +3588,82 @@ def test_cli_23_no_timer_line_when_the_cap_was_not_active(monkeypatch, capsys, t
 
 
 @pytest.mark.spec("CLI-24")
-def test_cli_24_names_a_threshold_when_a_small_change_exists(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-25")
+@pytest.mark.spec("MAN-16")
+def test_cli_24_25_quiet_stretch_replaces_the_all_timer_line_for_steps(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], steps(4, 8))
     lines = run.out.splitlines()
     assert run.rc == 0
     assert len(lines) == 7
-    assert lines[2] == "  frames: 0.0 first, 3.0 timer, 6.0 timer, 9.0 timer, 12.0 timer, 14.5 last"
-    assert lines[5] == ALL_TIMER_M_SUGGEST_LINE.format(
-        m="4.0", threshold="12.0", t="1.3", content=2, t2="1.3", sheets=1
-    )
+    assert lines[1] == "  30 thumbnails, selected 7/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)"
+    assert lines[2] == "  frames: 0.0 first, 3.0 timer, 5.0 diff, 8.0 timer, 10.0 diff, 13.0 timer, 14.5 last"
+    assert lines[3] == quiet_line([{"from": 0.0, "to": 14.5, "threshold": 1.3, "largest": 4.0}])
+    assert "all frames taken by the timer" not in run.out
     data = manifest()
     assert list(data["analysis"]) == ANALYSIS_KEYS
-    assert data["analysis"]["all_timer"] is True
-    assert data["analysis"]["threshold"] == {"requested": 12.0, "effective": 12.0}
-    assert [f["reason"] for f in data["frames"]] == ["first", "timer", "timer", "timer", "timer", "last"]
+    assert data["analysis"]["all_timer"] is False
+    assert data["analysis"]["timer_share"] == 0.6
+    assert data["analysis"]["quiet"] == [{"from": 0.0, "to": 14.5, "largest": 4.0, "threshold": 1.3}]
+    assert [f["reason"] for f in data["frames"]] == ["first", "timer", "diff", "timer", "diff", "timer", "last"]
 
 
 @pytest.mark.spec("CLI-24")
-def test_cli_24_m_is_measured_against_the_last_kept_frame_not_consecutive_thumbnails(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-25")
+def test_cli_24_25_quiet_stretch_from_a_slow_creep(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], [flat(i // 2) for i in range(30)])
     lines = run.out.splitlines()
     assert run.rc == 0
-    assert len(lines) == 7
-    assert lines[2] == "  frames: 0.0 first, 3.0 timer, 6.0 timer, 9.0 timer, 12.0 timer, 14.5 last"
-    assert lines[5] == ALL_TIMER_M_SUGGEST_LINE.format(
-        m="3.0", threshold="12.0", t="1.0", content=7, t2="1.0", sheets=1
+    assert lines[1] == "  30 thumbnails, selected 9/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)"
+    assert lines[2] == (
+        "  frames: 0.0 first, 2.0 diff, 4.0 diff, 6.0 diff, 8.0 diff, 10.0 diff, 12.0 diff, 14.0 diff, 14.5 last"
     )
+    assert lines[3] == quiet_line([{"from": 0.0, "to": 14.5, "threshold": 1.0, "largest": 3.0}])
+    assert "all frames taken by the timer" not in run.out
     data = manifest()
-    assert list(data["analysis"]) == ANALYSIS_KEYS
-    assert data["analysis"]["all_timer"] is True
-    assert data["analysis"]["threshold"] == {"requested": 12.0, "effective": 12.0}
-    assert [f["reason"] for f in data["frames"]] == ["first", "timer", "timer", "timer", "timer", "last"]
+    assert data["analysis"]["quiet"] == [{"from": 0.0, "to": 14.5, "largest": 3.0, "threshold": 1.0}]
 
 
 @pytest.mark.spec("CLI-24")
-def test_cli_24_suggested_threshold_ignores_the_requested_one(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-25")
+def test_cli_24_25_quiet_stretch_ignores_the_requested_threshold(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--threshold", "30"], steps(4, 8))
     lines = run.out.splitlines()
     assert run.rc == 0
-    assert lines[5] == ALL_TIMER_M_SUGGEST_LINE.format(
-        m="4.0", threshold="30.0", t="1.3", content=2, t2="1.3", sheets=1
-    )
+    assert lines[1] == "  30 thumbnails, selected 7/24 (threshold 30.0 -> 30.0, max gap 3.0 -> 3.0 s)"
+    assert lines[2] == "  frames: 0.0 first, 3.0 timer, 5.0 diff, 8.0 timer, 10.0 diff, 13.0 timer, 14.5 last"
+    assert lines[3] == quiet_line([{"from": 0.0, "to": 14.5, "threshold": 1.3, "largest": 4.0}])
 
 
 @pytest.mark.spec("CLI-24")
-def test_cli_24_t_is_floored_then_raised_to_the_1_0_floor(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-25")
+def test_cli_24_25_quiet_stretch_replaces_the_all_timer_line_for_a_small_step(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], [flat(0)] * 10 + [flat(2)] * 20)
     lines = run.out.splitlines()
     assert run.rc == 0
-    assert lines[5] == ALL_TIMER_M_SUGGEST_LINE.format(
-        m="2.0", threshold="12.0", t="1.0", content=1, t2="1.0", sheets=1
-    )
+    assert lines[2] == "  frames: 0.0 first, 3.0 timer, 5.0 diff, 8.0 timer, 11.0 timer, 14.0 timer, 14.5 last"
+    assert lines[3] == quiet_line([{"from": 0.0, "to": 14.5, "threshold": 1.0, "largest": 2.0}])
+    data = manifest()
+    assert data["analysis"]["timer_share"] == 0.8
+    assert data["analysis"]["quiet"] == [{"from": 0.0, "to": 14.5, "largest": 2.0, "threshold": 1.0}]
 
 
 @pytest.mark.spec("CLI-24")
+@pytest.mark.spec("CLI-25")
 def test_cli_24_second_form_when_m_is_not_above_1_0(monkeypatch, capsys, tmp_path):
+    """largest is 1.0 here, not above 1.0, so quiet_stretches finds no candidate (SEL-7)."""
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], [flat(0)] * 10 + [flat(1)] * 20)
     lines = run.out.splitlines()
     assert run.rc == 0
     assert lines[5] == ALL_TIMER_M_LINE.format(m="1.0", threshold="12.0")
     assert "--threshold" not in lines[5]
+    assert "quiet stretches" not in run.out
+    assert manifest()["analysis"]["quiet"] == []
 
 
 @pytest.mark.spec("CLI-24")
+@pytest.mark.spec("CLI-25")
 def test_cli_24_block_k_zero_long_recording_suggested_threshold_the_cap_then_rejects(monkeypatch, capsys, tmp_path):
+    """The one candidate (60 frames at threshold 2.0) does not fit the cap and is dropped: CLI-24 fires as before."""
     sheets = ["out/sheet-01.jpg", "out/sheet-02.jpg"]
     run = run_main(
         monkeypatch,
@@ -3608,16 +3684,1770 @@ def test_cli_24_block_k_zero_long_recording_suggested_threshold_the_cap_then_rej
         + ALL_TIMER_M_SUGGEST_LINE.format(m="6.2", threshold="12.0", t="2.0", content=0, t2="6.8", sheets=2) + "\n"
         + MANIFEST_LINE.format(out_dir="out") + "\n"
     )
+    assert "quiet stretches" not in run.out
+    assert manifest()["analysis"]["quiet"] == []
 
 
 @pytest.mark.spec("CLI-24")
-def test_cli_24_no_line_under_dry_run(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("CLI-25")
+def test_cli_24_25_no_line_under_dry_run(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--dry-run"], steps(4, 8))
     assert run.rc == 0
     assert "all frames taken by the timer" not in run.out
     assert run.out.splitlines() == [
         "clip.mp4: 15.0 s, 800x600, landscape",
-        "  30 thumbnails, selected 6/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)",
-        "  frames: 0.0 first, 3.0 timer, 6.0 timer, 9.0 timer, 12.0 timer, 14.5 last",
+        "  30 thumbnails, selected 7/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)",
+        "  frames: 0.0 first, 3.0 timer, 5.0 diff, 8.0 timer, 10.0 diff, 13.0 timer, 14.5 last",
+        quiet_line([{"from": 0.0, "to": 14.5, "threshold": 1.3, "largest": 4.0}]),
         "  layout: window, tile 516 px, 3x3 per sheet",
     ]
+    assert not (tmp_path / "out").exists()
+
+
+# ---------------------------------------------------------------- Step 11: quiet stretches get their own threshold (draft)
+
+
+def split():
+    return [flat(0), flat(2)] * 12 + [flat(100)] * 10 + [flat(104)] * 10 + [flat(108)] * 10
+
+
+def popup():
+    return [flat(2 if i % 2 else 0) for i in range(20)] + [flat(13)] + [flat(0)] * 9
+
+
+def short():
+    return [flat(0)] * 7 + [flat(5)] * 5 + [flat(0)] * 2
+
+
+def patch_on(base, v):
+    pixels = bytearray([base]) * SIZE
+    for r in range(8):
+        for c in range(8):
+            pixels[r * seenby.THUMB + c] = v
+    return bytes(pixels)
+
+
+def quiet_line(entries):
+    return "  quiet stretches at a lower threshold: " + "; ".join(
+        "%.1f-%.1f s at %.1f (largest change %.1f)" % (e["from"], e["to"], e["threshold"], e["largest"])
+        for e in entries
+    )
+
+
+@pytest.mark.spec("REC-10")
+def test_rec_10_quiet_entry_lowers_the_threshold_inside_its_range():
+    frames = seenby.select_frames(steps(4, 8), 12.0, 3.0, quiet=[{"from": 0.0, "to": 14.5, "threshold": 1.3}])
+    assert [(d["time"], d["reason"]) for d in frames] == [
+        (0.0, "first"),
+        (3.0, "timer"),
+        (5.0, "diff"),
+        (8.0, "timer"),
+        (10.0, "diff"),
+        (13.0, "timer"),
+        (14.5, "last"),
+    ]
+
+
+@pytest.mark.spec("REC-10")
+def test_rec_10_from_is_excluded_but_the_closing_to_uses_the_stretch_threshold():
+    frames = seenby.select_frames(steps(4, 8), 12.0, 3.0, quiet=[{"from": 5.0, "to": 10.0, "threshold": 1.3}])
+    assert [(d["time"], d["reason"]) for d in frames] == [
+        (0.0, "first"),
+        (3.0, "timer"),
+        (5.5, "diff"),
+        (8.5, "timer"),
+        (10.0, "diff"),
+        (13.0, "timer"),
+        (14.5, "last"),
+    ]
+
+
+@pytest.mark.spec("REC-10")
+def test_rec_10_popup_at_the_closing_end_of_a_stretch_survives_at_its_threshold():
+    today = seenby.select_frames(popup(), 12.0, 3.0)
+    assert [(d["time"], d["reason"]) for d in today] == [
+        (0.0, "first"),
+        (3.0, "timer"),
+        (6.0, "timer"),
+        (9.0, "timer"),
+        (10.0, "diff"),
+        (10.5, "diff"),
+        (13.5, "timer"),
+        (14.5, "last"),
+    ]
+    with_quiet = seenby.select_frames(popup(), 12.0, 3.0, quiet=[{"from": 0.0, "to": 10.0, "threshold": 1.0}])
+    assert [(d["time"], d["reason"]) for d in with_quiet] == (
+        [(0.0, "first")] + [(i / 2, "diff") for i in range(1, 22)] + [(13.5, "timer"), (14.5, "last")]
+    )
+    assert len(with_quiet) == 24
+
+
+@pytest.mark.spec("REC-10")
+def test_rec_10_empty_quiet_matches_todays_result():
+    today = seenby.select_frames(steps(4, 8), 12.0, 3.0)
+    assert [(d["time"], d["reason"]) for d in today] == [
+        (0.0, "first"),
+        (3.0, "timer"),
+        (6.0, "timer"),
+        (9.0, "timer"),
+        (12.0, "timer"),
+        (14.5, "last"),
+    ]
+    assert seenby.select_frames(steps(4, 8), 12.0, 3.0, quiet=[]) == today
+
+
+@pytest.mark.spec("SEL-7")
+def test_sel_7_quiet_stretches_from_the_steps_recording():
+    assert seenby.quiet_stretches(steps(4, 8), T, G, 24) == [
+        {"from": 0.0, "to": 14.5, "timer": 4, "largest": 4.0, "threshold": 1.3}
+    ]
+
+
+@pytest.mark.spec("SEL-7")
+def test_sel_7_candidate_ignores_the_requested_threshold():
+    assert seenby.quiet_stretches(steps(4, 8), 30.0, G, 24) == [
+        {"from": 0.0, "to": 14.5, "timer": 4, "largest": 4.0, "threshold": 1.3}
+    ]
+
+
+@pytest.mark.spec("SEL-7")
+def test_sel_7_slow_creep_gives_the_cli_24_threshold():
+    assert seenby.quiet_stretches([flat(i // 2) for i in range(30)], T, G, 24) == [
+        {"from": 0.0, "to": 14.5, "timer": 4, "largest": 3.0, "threshold": 1.0}
+    ]
+
+
+@pytest.mark.spec("SEL-7")
+@pytest.mark.parametrize("thumbs", [static(30), [flat(0)] * 10 + [flat(1)] * 20])
+def test_sel_7_no_candidate_when_the_largest_change_is_at_or_below_1(thumbs):
+    assert seenby.quiet_stretches(thumbs, T, G, 24) == []
+
+
+@pytest.mark.spec("SEL-7")
+def test_sel_7_short_selection_with_no_content_frame_before_last_gets_a_stretch():
+    thumbs = [flat(0)] * 5 + [flat(2)] * 11 + [flat(100)]
+    assert seenby.quiet_stretches(thumbs, T, G, 24) == [
+        {"from": 0.0, "to": 8.0, "timer": 2, "largest": 2.0, "threshold": 1.0}
+    ]
+
+
+@pytest.mark.spec("SEL-7")
+def test_sel_7_run_after_a_content_frame_still_needs_three_timer_frames():
+    thumbs = [flat(0)] + [flat(20)] * 8 + [flat(23)] * 6
+    assert seenby.quiet_stretches(thumbs, T, G, 24) == []
+
+
+@pytest.mark.spec("SEL-7")
+def test_sel_7_short_recording_needs_only_the_two_ends():
+    assert seenby.quiet_stretches(short(), T, G, 24) == [
+        {"from": 0.0, "to": 6.5, "timer": 2, "largest": 5.0, "threshold": 1.6}
+    ]
+
+
+@pytest.mark.spec("SEL-7")
+def test_sel_7_short_selection_with_zero_timer_frames_still_gets_a_stretch():
+    thumbs = [flat(0)] * 3 + [flat(3)] * 2
+    assert seenby.quiet_stretches(thumbs, T, G, 24) == [
+        {"from": 0.0, "to": 2.0, "timer": 0, "largest": 3.0, "threshold": 1.0}
+    ]
+
+
+@pytest.mark.spec("SEL-7")
+@pytest.mark.parametrize("thumbs", [static(14), [flat(0), straddle(100)], [flat(0)]])
+def test_sel_7_no_candidate_pair_gives_empty_list(thumbs):
+    assert seenby.quiet_stretches(thumbs, T, G, 24) == []
+
+
+@pytest.mark.spec("SEL-7")
+def test_sel_7_block_k_zero_finds_the_blocky_stretch():
+    assert seenby.quiet_stretches(blocky(), T, G, 24, 0.0) == [
+        {"from": 0.0, "to": 9.5, "timer": 3, "largest": 6.25, "threshold": 2.0}
+    ]
+
+
+@pytest.mark.spec("SEL-7")
+def test_sel_7_candidate_dropped_when_it_does_not_fit_the_cap():
+    assert seenby.quiet_stretches([flat(0), patch(100)] * 30, T, G, 24, 0.0) == []
+
+
+@pytest.mark.spec("SEL-7")
+def test_sel_7_split_recording_keeps_the_stretch_with_fewer_timer_frames():
+    assert seenby.quiet_stretches(split(), T, G, 24) == [
+        {"from": 12.0, "to": 26.5, "timer": 4, "largest": 4.0, "threshold": 1.3}
+    ]
+
+
+@pytest.mark.spec("SEL-7")
+def test_sel_7_split_recording_keeps_both_stretches_under_a_bigger_cap():
+    assert seenby.quiet_stretches(split(), T, G, 60) == [
+        {"from": 0.0, "to": 12.0, "timer": 3, "largest": 2.0, "threshold": 1.0},
+        {"from": 12.0, "to": 26.5, "timer": 4, "largest": 4.0, "threshold": 1.3},
+    ]
+
+
+@pytest.mark.spec("SEL-7")
+def test_sel_7_empty_thumbs_gives_empty_list():
+    assert seenby.quiet_stretches([], T, G, 24) == []
+
+
+@pytest.mark.spec("SEL-7")
+def test_sel_7_popup_at_the_closing_end_counts_as_the_largest_change():
+    assert seenby.quiet_stretches(popup(), T, G, 24) == [
+        {"from": 0.0, "to": 10.0, "timer": 3, "largest": 2.0, "threshold": 1.0}
+    ]
+
+
+@pytest.mark.spec("SEL-7")
+def test_sel_7_selection_ending_on_a_timer_frame_is_still_an_end():
+    thumbs = [flat(0)] * 7 + [flat(4)] * 12
+    assert seenby.quiet_stretches(thumbs, T, G, 24) == [
+        {"from": 0.0, "to": 9.0, "timer": 2, "largest": 4.0, "threshold": 1.3}
+    ]
+    frames = seenby.select_frames(thumbs, T, G, quiet=[{"from": 0.0, "to": 9.0, "threshold": 1.3}])
+    assert [(d["time"], d["reason"]) for d in frames] == [
+        (0.0, "first"),
+        (3.0, "timer"),
+        (3.5, "diff"),
+        (6.5, "timer"),
+        (9.0, "last"),
+    ]
+
+
+@pytest.mark.spec("SEL-7")
+def test_sel_7_cap_drops_the_whole_range_candidate():
+    thumbs = [flat(3 * (i % 2)) for i in range(14)]
+    assert seenby.quiet_stretches(thumbs, T, G, 4) == []
+    assert seenby.quiet_stretches(thumbs, T, G, 24) == [
+        {"from": 0.0, "to": 6.5, "timer": 2, "largest": 3.0, "threshold": 1.0}
+    ]
+
+
+@pytest.mark.spec("CLI-25")
+@pytest.mark.spec("MAN-16")
+def test_cli_25_man_16_quiet_times_are_shifted_by_the_range_start(monkeypatch, capsys, tmp_path):
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--from", "5"], steps(4, 8), probe=(20.0, 800, 600)
+    )
+    lines = run.out.splitlines()
+    assert run.rc == 0
+    assert lines[1] == "  range: 5.0-20.0 s"
+    assert lines[2] == "  30 thumbnails, selected 7/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)"
+    assert lines[3] == "  frames: 5.0 first, 8.0 timer, 10.0 diff, 13.0 timer, 15.0 diff, 18.0 timer, 19.5 last"
+    assert lines[4] == quiet_line([{"from": 5.0, "to": 19.5, "threshold": 1.3, "largest": 4.0}])
+    assert run.thumbnails_calls == [("clip.mp4", 2.0, 5.0, 15.0)]
+    data = manifest()
+    assert data["analysis"]["quiet"] == [{"from": 5.0, "to": 19.5, "largest": 4.0, "threshold": 1.3}]
+
+
+@pytest.mark.spec("CLI-25")
+def test_cli_25_split_recording_keeps_only_the_busy_half_quiet(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], split(), probe=(27.0, 800, 600))
+    lines = run.out.splitlines()
+    assert run.rc == 0
+    assert lines[1] == "  54 thumbnails, selected 11/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)"
+    assert lines[2] == (
+        "  frames: 0.0 first, 3.0 timer, 6.0 timer, 9.0 timer, 12.0 diff, 15.0 timer, "
+        "17.0 diff, 20.0 timer, 22.0 diff, 25.0 timer, 26.5 last"
+    )
+    assert lines[3] == quiet_line([{"from": 12.0, "to": 26.5, "threshold": 1.3, "largest": 4.0}])
+    data = manifest()
+    assert data["analysis"]["quiet"] == [{"from": 12.0, "to": 26.5, "largest": 4.0, "threshold": 1.3}]
+
+
+@pytest.mark.spec("CLI-25")
+def test_cli_25_short_recording_gets_a_quiet_line(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], short(), probe=(7.0, 800, 600))
+    lines = run.out.splitlines()
+    assert run.rc == 0
+    assert lines[1] == "  14 thumbnails, selected 5/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)"
+    assert lines[2] == "  frames: 0.0 first, 3.0 timer, 3.5 diff, 6.0 diff, 6.5 last"
+    assert lines[3] == quiet_line([{"from": 0.0, "to": 6.5, "threshold": 1.6, "largest": 5.0}])
+    assert lines[4].startswith("  layout: window")
+    assert "all frames taken by the timer" not in run.out
+    data = manifest()
+    assert data["analysis"]["quiet"] == [{"from": 0.0, "to": 6.5, "largest": 5.0, "threshold": 1.6}]
+    assert data["analysis"]["all_timer"] is False
+    assert data["analysis"]["timer_share"] == 0.33
+    frames = data["frames"]
+    assert frames[2]["diff"] == 5.0
+    assert frames[3]["diff"] == 5.0
+
+
+@pytest.mark.spec("CLI-25")
+def test_cli_25_short_recording_dry_run_prints_the_same_lines(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--dry-run"], short(), probe=(7.0, 800, 600))
+    lines = run.out.splitlines()
+    assert run.rc == 0
+    assert len(lines) == 5
+    assert lines[0] == "clip.mp4: 7.0 s, 800x600, landscape"
+    assert lines[1] == "  14 thumbnails, selected 5/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)"
+    assert lines[2] == "  frames: 0.0 first, 3.0 timer, 3.5 diff, 6.0 diff, 6.5 last"
+    assert lines[3] == quiet_line([{"from": 0.0, "to": 6.5, "threshold": 1.6, "largest": 5.0}])
+    assert lines[4].startswith("  layout: window")
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.spec("CLI-25")
+@pytest.mark.spec("MAN-11")
+def test_cli_25_man_11_static_14_at_7s_has_no_quiet_line(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(14), probe=(7.0, 800, 600))
+    lines = run.out.splitlines()
+    assert run.rc == 0
+    assert lines[2] == "  frames: 0.0 first, 3.0 timer, 6.0 timer, 6.5 last"
+    assert "quiet stretches at a lower threshold" not in run.out
+    assert "all frames taken by the timer" not in run.out
+    data = manifest()
+    assert data["analysis"]["quiet"] == []
+    assert data["analysis"]["all_timer"] is False
+
+
+@pytest.mark.spec("CLI-25")
+def test_cli_25_popup_at_the_closing_end_is_kept_by_the_stretch(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], popup())
+    lines = run.out.splitlines()
+    assert run.rc == 0
+    assert lines[1] == "  30 thumbnails, selected 24/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)"
+    assert lines[2] == (
+        "  frames: 0.0 first, " + ", ".join("%.1f diff" % (i / 2) for i in range(1, 22)) + ", 13.5 timer, 14.5 last"
+    )
+    assert lines[3] == quiet_line([{"from": 0.0, "to": 10.0, "threshold": 1.0, "largest": 2.0}])
+    data = manifest()
+    assert data["analysis"]["quiet"] == [{"from": 0.0, "to": 10.0, "largest": 2.0, "threshold": 1.0}]
+
+
+@pytest.mark.spec("MAN-16")
+@pytest.mark.spec("CLI-25")
+def test_man_16_cli_25_block_active_uses_the_lowest_of_the_quiet_thresholds(monkeypatch, capsys, tmp_path):
+    thumbs = [flat(0)] * 3 + [flat(30)] * 3 + [patch_on(30, 100)] * 3 + [flat(30)] * 21
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--threshold", "60"], thumbs)
+    lines = run.out.splitlines()
+    assert run.rc == 0
+    assert lines[1] == "  30 thumbnails, selected 8/24 (threshold 60.0 -> 60.0, max gap 3.0 -> 3.0 s)"
+    assert lines[2] == "  frames: 0.0 first, 1.5 diff, 3.0 block, 4.5 block, 7.5 timer, 10.5 timer, 13.5 timer, 14.5 last"
+    assert lines[3] == quiet_line([{"from": 0.0, "to": 14.5, "threshold": 11.4, "largest": 34.375}])
+    assert "block rule inactive" not in run.out
+    data = manifest()
+    assert data["analysis"]["block_active"] is True
+    assert data["analysis"]["quiet"] == [{"from": 0.0, "to": 14.5, "largest": 34.375, "threshold": 11.4}]
+    frames = data["frames"]
+    assert [f["time"] for f in frames] == [0.0, 1.5, 3.0, 4.5, 7.5, 10.5, 13.5, 14.5]
+    assert [f["reason"] for f in frames] == ["first", "diff", "block", "block", "timer", "timer", "timer", "last"]
+    assert frames[2]["diff"] == 4.375
+    assert frames[2]["block"] == 70.0
+
+
+# ---------------------------------------------------------------- Step 12: the events selector
+
+GW, GH = 20, 10
+
+
+def grid(cells):
+    """Change plane of 20 x 10 cells, cell (x, y) at index y * 20 + x, every other byte 0."""
+    plane = bytearray(GW * GH)
+    for (x, y), v in cells.items():
+        plane[y * GW + x] = v
+    return bytes(plane)
+
+
+def box(x0, y0, w, h, v=255):
+    return {(x, y): v for x in range(x0, x0 + w) for y in range(y0, y0 + h)}
+
+
+def S(cells):
+    return (bytes(GW * GH), grid(cells))
+
+
+def M(mean_cells, change_cells):
+    return (grid(mean_cells), grid(change_cells))
+
+
+def blob(x, y, w=24, h=32, px=300.0, g=False):
+    return {"px": px, "x": x, "y": y, "w": w, "h": h, "global": g}
+
+
+def approx_px(expected):
+    """`expected` with `px` compared approximately: the spec leaves the order of `* cell * cell / 255` open."""
+    return dict(expected, px=pytest.approx(expected["px"]))
+
+
+def event_fields(event, expected):
+    """The keys of `expected` taken from `event`, for comparison with `expected` (events carry more keys)."""
+    return {key: event[key] for key in expected}
+
+
+@pytest.mark.parametrize(
+    "name, value",
+    [
+        pytest.param("EVENT_FPS", 4, marks=pytest.mark.spec("CLI-26")),
+        pytest.param("CELL", 8, marks=pytest.mark.spec("BLB-2")),
+        pytest.param("PIXEL_T", 24, marks=pytest.mark.spec("MAN-17")),
+        pytest.param("MIN_CELL", 8, marks=pytest.mark.spec("BLB-1")),
+        pytest.param("NOISE_PX", 12, marks=pytest.mark.spec("BLB-2")),
+        pytest.param("GLOBAL_SHARE", 0.25, marks=pytest.mark.spec("BLB-3")),
+        pytest.param("POINTER_BOX", 64, marks=pytest.mark.spec("PTR-1")),
+        pytest.param("POINTER_DIM", 8, marks=pytest.mark.spec("PTR-1")),
+        pytest.param("POINTER_PX", 0.45, marks=pytest.mark.spec("PTR-1")),
+        pytest.param("REGION_MARGIN", 16, marks=pytest.mark.spec("EVT-1")),
+        pytest.param("LONG_S", 2.0, marks=pytest.mark.spec("PCK-4")),
+        pytest.param("INNER_WEIGHT", 0.8, marks=pytest.mark.spec("PCK-4")),
+        pytest.param("GLOBAL_WEIGHT", 4.0, marks=pytest.mark.spec("EVT-2")),
+        pytest.param("EPISODE_S", 5.0, marks=pytest.mark.spec("PCK-2")),
+        pytest.param("SPREAD", 0.5, marks=pytest.mark.spec("PCK-2")),
+        pytest.param("FILL_MIN_S", 0.5, marks=pytest.mark.spec("PCK-3")),
+    ],
+)
+def test_blb_ptr_evt_pck_cli_26_man_17_step_12_constants_have_the_spec_values(name, value):
+    assert getattr(seenby, name) == value
+
+
+@pytest.mark.spec("EVT-3")
+@pytest.mark.parametrize("name, value", [("HOLD_DELTA", 6), ("HOLD_SHARE", 0.25)])
+def test_evt_3_constants_have_the_spec_values(name, value):
+    assert getattr(seenby, name) == value
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_blink_repeats_is_four():
+    assert seenby.BLINK_REPEATS == 4
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_caret_h_is_64():
+    assert seenby.CARET_H == 64
+
+
+# -------- BLB-1..3 (blobs)
+
+
+@pytest.mark.spec("BLB-1")
+@pytest.mark.spec("BLB-2")
+def test_blb_1_2_one_box_is_one_blob_in_native_pixels():
+    assert seenby.blobs(grid(box(2, 2, 3, 4)), GW, GH) == [
+        approx_px({"px": 768.0, "x": 16, "y": 16, "w": 24, "h": 32, "global": False})
+    ]
+
+
+@pytest.mark.spec("BLB-1")
+def test_blb_1_a_gap_of_one_cell_joins():
+    assert seenby.blobs(grid(box(2, 2, 1, 1) | box(4, 2, 1, 1)), GW, GH) == [
+        approx_px({"px": 128.0, "x": 16, "y": 16, "w": 24, "h": 8, "global": False})
+    ]
+
+
+@pytest.mark.spec("BLB-1")
+def test_blb_1_a_gap_of_two_cells_does_not_join():
+    assert seenby.blobs(grid(box(2, 2, 1, 1) | box(5, 2, 1, 1)), GW, GH) == [
+        approx_px({"px": 64.0, "x": 16, "y": 16, "w": 8, "h": 8, "global": False}),
+        approx_px({"px": 64.0, "x": 40, "y": 16, "w": 8, "h": 8, "global": False}),
+    ]
+
+
+@pytest.mark.spec("BLB-1")
+@pytest.mark.spec("BLB-2")
+@pytest.mark.parametrize(
+    "v, expected",
+    [
+        (7, []),
+        (8, []),
+        (51, [approx_px({"px": 12.8, "x": 16, "y": 16, "w": 8, "h": 8, "global": False})]),
+    ],
+)
+def test_blb_1_2_active_cell_and_noise_floor(v, expected):
+    assert seenby.blobs(grid(box(2, 2, 1, 1, v)), GW, GH) == expected
+
+
+@pytest.mark.spec("BLB-2")
+def test_blb_2_a_quarter_of_the_cells_is_not_global():
+    assert seenby.blobs(grid(box(0, 0, 10, 5, 100)), GW, GH) == [
+        approx_px({"px": 1254.9019607843138, "x": 0, "y": 0, "w": 80, "h": 40, "global": False})
+    ]
+
+
+@pytest.mark.spec("BLB-3")
+def test_blb_3_more_than_a_quarter_of_the_cells_is_one_global_blob():
+    assert seenby.blobs(grid(box(0, 0, 10, 5) | box(10, 0, 1, 1)), GW, GH) == [
+        approx_px({"px": 3264.0, "x": 0, "y": 0, "w": 160, "h": 80, "global": True})
+    ]
+
+
+@pytest.mark.spec("BLB-1")
+def test_blb_1_no_active_cell_gives_no_blob():
+    assert seenby.blobs(grid({}), GW, GH) == []
+
+
+@pytest.mark.spec("BLB-1")
+@pytest.mark.spec("BLB-2")
+def test_blb_1_2_cell_argument_scales_the_box():
+    assert seenby.blobs(grid(box(3, 3, 2, 2)), GW, GH, cell=4) == [
+        approx_px({"px": 64.0, "x": 12, "y": 12, "w": 8, "h": 8, "global": False})
+    ]
+
+
+# -------- PTR-1 (pointer)
+
+
+def pointer_pair():
+    return blob(80, 40, px=190.0), blob(120, 48, px=170.0)
+
+
+@pytest.mark.spec("PTR-1")
+def test_ptr_1_two_alike_pointer_sized_blobs_are_the_pointer():
+    a, b = pointer_pair()
+    assert seenby.pointer([a, b]) is True
+
+
+@pytest.mark.spec("PTR-1")
+@pytest.mark.parametrize(
+    "case",
+    ["one blob", "three blobs", "px 90 against 190", "widths 24 and 40", "wider than 64", "global"],
+)
+def test_ptr_1_anything_else_is_not_the_pointer(case):
+    a, b = pointer_pair()
+    bs = {
+        "one blob": [a],
+        "three blobs": [a, b, blob(200, 48)],
+        "px 90 against 190": [a, b | {"px": 90.0}],
+        "widths 24 and 40": [a, b | {"w": 40}],
+        "wider than 64": [a | {"w": 72}, b | {"w": 72}],
+        "global": [a | {"global": True}, b],
+    }[case]
+    assert seenby.pointer(bs) is False
+
+
+# -------- EVT-1..2 (events_of)
+
+EVENT_BOX_24x32 = {"px": 300.0, "w": 24, "h": 32, "global": False}
+
+
+@pytest.mark.spec("EVT-1")
+@pytest.mark.spec("EVT-2")
+def test_evt_1_2_a_change_is_settled_until_the_next_change_over_it():
+    content = [[], [], [blob(16, 16)], [], [], [blob(100, 16)], [blob(16, 16)], []]
+    events = seenby.events_of(content)
+    expected = [
+        {"start": 2, "end": 2, "settled": 2, "until": 5, "x": 16},
+        {"start": 5, "settled": 5, "until": 7, "x": 100},
+        {"start": 6, "settled": 6, "until": 7, "x": 16},
+    ]
+    assert [event_fields(e, want) for e, want in zip(events, expected)] == expected
+    assert len(events) == 3
+    for e in events:
+        assert event_fields(e, EVENT_BOX_24x32) == approx_px(EVENT_BOX_24x32)
+
+
+@pytest.mark.spec("EVT-1")
+def test_evt_1_changes_touching_the_growing_box_join_one_event():
+    content = [[], [blob(16, 16)], [blob(40, 16)], [blob(16, 16)], [], []]
+    events = seenby.events_of(content)
+    expected = {"start": 1, "end": 3, "settled": 3, "until": 5, "px": 900.0, "x": 16, "w": 48, "h": 32}
+    assert len(events) == 1
+    assert event_fields(events[0], expected) == approx_px(expected)
+
+
+@pytest.mark.spec("EVT-1")
+def test_evt_1_not_joined_an_event_grows_only_within_one_pair():
+    content = [[], [blob(16, 16)], [blob(40, 16)], [blob(16, 16)], [], []]
+    events = seenby.events_of(content, joined=False)
+    expected = [
+        {"start": 1, "until": 2, "x": 16},
+        {"start": 2, "until": 5, "x": 40},
+        {"start": 3, "until": 5, "x": 16},
+    ]
+    assert len(events) == 3
+    assert [event_fields(e, want) for e, want in zip(events, expected)] == expected
+
+
+@pytest.mark.spec("EVT-1")
+def test_evt_1_whole_frame_blob_absorbs_the_open_event():
+    content = [[], [blob(16, 16)], [blob(100, 16)], [blob(0, 0, 160, 80, 5000.0, True)], []]
+    events = seenby.events_of(content)
+    first = {"start": 1, "end": 1, "until": 2, "x": 16}
+    second = {
+        "start": 2, "end": 3, "settled": 3, "until": 4, "px": 5300.0,
+        "x": 0, "y": 0, "w": 160, "h": 80, "global": True,
+    }
+    assert len(events) == 2
+    assert event_fields(events[0], first) == first
+    assert event_fields(events[1], second) == approx_px(second)
+
+
+@pytest.mark.spec("EVT-1")
+@pytest.mark.parametrize("x", [56, 57])
+def test_evt_1_a_pair_without_change_ends_the_event(x):
+    events = seenby.events_of([[], [blob(16, 16)], [], [blob(x, 16)], []])
+    assert len(events) == 2
+    assert [e["until"] for e in events] == [4, 4]
+    assert [e["start"] for e in events] == [1, 3]
+
+
+@pytest.mark.spec("EVT-2")
+def test_evt_2_weight_is_log_of_changed_pixels():
+    weight = seenby.events_of([[], [blob(0, 0, px=300.0)]])[0]["weight"]
+    assert round(weight, 4) == 5.7071
+    assert weight == pytest.approx(math.log(301))
+
+
+@pytest.mark.spec("EVT-2")
+def test_evt_2_global_event_weighs_four_more():
+    weight = seenby.events_of([[], [blob(0, 0, 160, 80, 5000.0, True)]])[0]["weight"]
+    assert round(weight, 4) == 12.5174
+    assert weight == pytest.approx(math.log(5001) + 4)
+
+
+# -------- PCK-1..3 (pick, fill)
+
+
+@pytest.mark.spec("PCK-1")
+@pytest.mark.parametrize(
+    "windows, budget, last, expected",
+    [
+        ([(2, 4, 1.0), (3, 6, 1.0), (7, 7, 1.0)], 24, 9, [0, 4, 7, 9]),
+        ([(2, 4, 1.0), (5, 6, 1.0), (7, 7, 1.0)], 24, 9, [0, 4, 6, 7, 9]),
+        ([], 24, 0, [0]),
+        ([], 24, 5, [0, 5]),
+        ([(0, 3, 1.0)], 24, 5, [0, 3, 5]),
+        ([(2, 5, 1.0)], 24, 5, [0, 5]),
+    ],
+)
+def test_pck_1_stabbing_set_within_budget(windows, budget, last, expected):
+    assert seenby.pick(windows, budget, last) == expected
+
+
+@pytest.mark.spec("PCK-2")
+@pytest.mark.parametrize(
+    "windows, budget, last, expected",
+    [
+        ([(2, 4, 1.0), (5, 6, 1.0), (7, 7, 1.0), (8, 8, 1.0)], 4, 9, [0, 4, 6, 9]),
+        ([(2, 2, 5.0), (3, 3, 1.0), (40, 40, 1.0), (41, 41, 1.0)], 4, 60, [0, 2, 40, 60]),
+        ([(2, 2, 5.0), (3, 3, 1.0), (4, 4, 1.0), (5, 5, 1.0)], 4, 60, [0, 2, 5, 60]),
+        ([(2, 2, 1.0), (3, 3, 1.0), (4, 4, 1.0), (30, 30, 1.0), (31, 31, 1.0)], 5, 60, [0, 2, 4, 30, 60]),
+    ],
+)
+def test_pck_2_over_budget_bursts_first_then_weighted_spread(windows, budget, last, expected):
+    assert seenby.pick(windows, budget, last) == expected
+
+
+def pick_as_written(windows, budget, last, fps=4):
+    """PCK-1 and PCK-2 word for word, every gain recomputed from scratch and summed in the order of `windows`."""
+    points = []
+    for settled, until, _ in sorted(windows, key=lambda w: (w[1], w[0])):
+        if not points or points[-1] < settled:
+            points.append(until)
+    stabbing = sorted(set(points) | {0, last})
+    if len(stabbing) <= budget:
+        return stabbing
+    chosen = {0, last}
+
+    def covered(window):
+        return any(window[0] <= p <= window[1] for p in chosen)
+
+    groups = []
+    for window in sorted(windows, key=lambda w: w[0]):
+        if groups and window[0] - groups[-1][-1][0] <= round(5.0 * fps):
+            groups[-1].append(window)
+        else:
+            groups.append([window])
+    for _, group in sorted(enumerate(groups), key=lambda g: (-max(w[2] for w in g[1]), g[0])):
+        if len(chosen) >= budget:
+            break
+        if any(covered(w) for w in group):
+            continue
+        chosen.add(min(group, key=lambda w: (-w[2], w[1]))[1])
+    while len(chosen) < budget:
+        best, best_gain = None, 0.0
+        for t in sorted({w[1] for w in windows} - chosen):
+            total = sum(w[2] for w in windows if w[0] <= t <= w[1] and not covered(w))
+            d = min(abs(t - p) for p in chosen)
+            gain = total * (1 + 0.5 * math.log(1 + d / fps))
+            if gain > best_gain:
+                best, best_gain = t, gain
+        if best is None:
+            break
+        chosen.add(best)
+    return sorted(chosen)
+
+
+@pytest.mark.spec("PCK-2")
+@pytest.mark.spec("PCK-1")
+def test_pck_2_pick_equals_the_rules_as_written_on_seeded_random_inputs():
+    rng = random.Random(20260927)
+    mismatches = []
+    for _ in range(4000):
+        last = rng.randint(5, 120)
+        windows = []
+        for _ in range(rng.randint(1, 30)):
+            a = rng.randint(0, last)
+            windows.append((a, min(last, a + rng.choice([0, 1, 2, 3, 5, 10, 40])), rng.uniform(2.5, 14.0)))
+        budget = rng.randint(2, 12)
+        got, want = seenby.pick(windows, budget, last), pick_as_written(windows, budget, last)
+        if got != want:
+            mismatches.append((windows, budget, last, got, want))
+    assert (len(mismatches), mismatches[:1]) == (0, [])
+
+
+@pytest.mark.spec("PCK-3")
+@pytest.mark.parametrize(
+    "points, long_pairs, budget, expected",
+    [
+        ([0, 20], list(range(4, 17)), 5, [0, 5, 10, 15, 20]),
+        ([0, 20], [], 5, [0, 20]),
+        ([0, 3], [1, 2], 5, [0, 3]),
+        ([0, 20, 40], list(range(21, 40)), 5, [0, 20, 25, 30, 40]),
+    ],
+)
+def test_pck_3_fill_spends_the_budget_inside_long_changes(points, long_pairs, budget, expected):
+    assert seenby.fill(points, long_pairs, budget) == expected
+
+
+# -------- PCK-4 (select_events)
+# events_ptr, events_dbl, events_two and events_long are the spec's `ptr`, `dbl`, `two` and `long` of step 12
+# (step 9 already has a `two`).
+
+
+def events_ptr():
+    return [
+        S({}),
+        S(box(2, 2, 3, 4, 170) | box(10, 2, 3, 4, 150)),
+        S(box(10, 2, 3, 4, 170) | box(15, 5, 3, 4, 160)),
+        S({}),
+        S({}),
+    ]
+
+
+def events_dbl():
+    return [S({}), S(box(2, 2, 3, 3)), S(box(2, 2, 3, 3)), S({}), S({})]
+
+
+def events_two():
+    return [S({}), S(box(2, 2, 3, 3)), S({}), S(box(12, 2, 3, 3)), S({}), S(box(2, 2, 3, 3)), S({})]
+
+
+def events_long():
+    return [S({})] + [S(box(0, 0, 20, 10, 60))] * 12 + [S({}), S({})]
+
+
+@pytest.mark.spec("PCK-4")
+def test_pck_4_a_toggle_that_stays_is_shown_by_the_last_frame():
+    samples = [S({}), S({}), S(box(2, 2, 3, 4)), S({}), S({}), S({}), S({}), S({})]
+    result = seenby.select_events(samples, GW, GH, 24)
+    expected = {"start": 2, "settled": 2, "until": 7, "px": 768.0}
+    assert result["frames"] == [(0, "first"), (7, "last")]
+    assert len(result["events"]) == 1
+    assert event_fields(result["events"][0], expected) == approx_px(expected)
+
+
+@pytest.mark.spec("PCK-4")
+@pytest.mark.spec("PTR-1")
+def test_pck_4_ptr_1_pointer_moves_make_no_event():
+    result = seenby.select_events(events_ptr(), GW, GH, 24)
+    assert result["frames"] == [(0, "first"), (4, "last")]
+    assert result["events"] == []
+
+
+@pytest.mark.spec("PCK-4")
+@pytest.mark.spec("PTR-1")
+def test_pck_4_ptr_1_pointer_moves_counts_the_pairs_taken_for_the_pointer():
+    assert seenby.select_events(events_ptr(), GW, GH, 24).get("pointer_moves") == 2
+
+
+@pytest.mark.spec("PCK-4")
+@pytest.mark.spec("PTR-1")
+def test_pck_4_ptr_1_a_pointer_pair_then_a_real_change():
+    samples = [S({}), S(box(2, 2, 3, 4, 170) | box(10, 2, 3, 4, 150)), S({}), S(box(15, 5, 3, 3)), S({}), S({})]
+    result = seenby.select_events(samples, GW, GH, 24)
+    expected = {"start": 3, "until": 5, "px": 576.0, "x": 120, "y": 40, "w": 24, "h": 24}
+    assert result["frames"] == [(0, "first"), (5, "last")]
+    assert len(result["events"]) == 1
+    assert event_fields(result["events"][0], expected) == approx_px(expected)
+
+
+@pytest.mark.spec("PCK-4")
+@pytest.mark.parametrize(
+    "samples, frames",
+    [
+        ([S({})] * 6, [(0, "first"), (5, "last")]),
+        ([S({})], [(0, "first")]),
+    ],
+)
+def test_pck_4_no_change_gives_first_and_last_only(samples, frames):
+    result = seenby.select_events(samples, GW, GH, 24)
+    assert result["frames"] == frames
+    assert result["events"] == []
+
+
+@pytest.mark.spec("PCK-4")
+def test_pck_4_empty_samples_give_nothing():
+    assert seenby.select_events([], GW, GH, 24) == {
+        "frames": [], "events": [], "blinking": [], "pointer_moves": 0, "needed": 0,
+    }
+
+
+@pytest.mark.spec("PCK-4")
+def test_pck_4_a_state_inside_a_transition_gets_a_frame():
+    result = seenby.select_events(events_dbl(), GW, GH, 24)
+    expected = {"start": 1, "settled": 2, "until": 4, "px": 1152.0}
+    assert result["frames"] == [(0, "first"), (1, "state"), (4, "last")]
+    assert len(result["events"]) == 1
+    assert event_fields(result["events"][0], expected) == approx_px(expected)
+
+
+@pytest.mark.spec("PCK-4")
+def test_pck_4_state_frames_only_while_the_budget_lasts():
+    result = seenby.select_events(events_dbl(), GW, GH, 2)
+    assert result["frames"] == [(0, "first"), (4, "last")]
+
+
+@pytest.mark.spec("PCK-4")
+def test_pck_4_one_sample_shows_two_earlier_states():
+    result = seenby.select_events(events_two(), GW, GH, 24)
+    expected = [
+        {"start": 1, "until": 4, "x": 16, "y": 16, "w": 24, "h": 24},
+        {"start": 3, "until": 6, "x": 96, "y": 16, "w": 24, "h": 24},
+        {"start": 5, "until": 6, "x": 16, "y": 16, "w": 24, "h": 24},
+    ]
+    assert result["frames"] == [(0, "first"), (4, "change"), (6, "last")]
+    assert len(result["events"]) == 3
+    assert [event_fields(e, want) for e, want in zip(result["events"], expected)] == expected
+
+
+@pytest.mark.spec("PCK-4")
+@pytest.mark.spec("PCK-3")
+def test_pck_3_4_long_change_under_a_small_budget():
+    result = seenby.select_events(events_long(), GW, GH, 4)
+    expected = {"start": 1, "settled": 12, "until": 14, "global": True}
+    assert result["frames"] == [(0, "first"), (4, "fill"), (9, "during"), (14, "last")]
+    assert len(result["events"]) == 1
+    assert event_fields(result["events"][0], expected) == expected
+
+
+@pytest.mark.spec("PCK-4")
+@pytest.mark.spec("PCK-3")
+def test_pck_3_4_long_change_under_the_default_budget():
+    result = seenby.select_events(events_long(), GW, GH, 24)
+    assert result["frames"] == [
+        (0, "first"), (1, "state"), (2, "fill"), (3, "state"), (4, "fill"), (5, "state"), (6, "fill"),
+        (7, "state"), (8, "state"), (9, "during"), (10, "state"), (11, "fill"), (14, "last"),
+    ]
+
+
+@pytest.mark.spec("PCK-4")
+@pytest.mark.parametrize(
+    "samples, budget, needed",
+    [
+        (events_two(), 24, 3),
+        (events_two(), 2, 3),
+        ([S({})], 24, 1),
+    ],
+)
+def test_pck_4_needed_is_the_frames_every_window_would_take(samples, budget, needed):
+    assert seenby.select_events(samples, GW, GH, budget).get("needed") == needed
+
+
+# -------- CLI-26, CLI-27, MAN-17 (main() with --selector events)
+
+EVENTS_ARGV = ["clip.mp4", "out", "--selector", "events"]
+EVENTS_PROBE = (2.0, 160, 80)
+EVENTS_HEADER = "clip.mp4: 2.0 s, 160x80, landscape"
+EVENTS_LAYOUT = "  layout: wide, tile 160 px, 2x18 per sheet"
+LEGACY_ONLY = "--threshold, --max-gap, --block-k and --sample-fps apply to the legacy selector only"
+EVENTS_ANALYSIS_KEYS = [
+    "selector", "sample_fps", "samples", "cell", "pixel_threshold", "max_frames", "range", "segment", "changes",
+    "shown", "pointer_moves", "blinking",
+]
+EVENTS_TOP_LEVEL_KEYS = TOP_LEVEL_KEYS + ["events"]
+EVENTS_EVENT_KEYS = ["from", "settled", "until", "region", "changed_px", "shown"]
+EVENTS_FRAME_KEYS = ["n", "time", "file", "sheet", "reason", "recheck"]
+
+
+def events_recheck(video, out_dir, n, k, start, length=None, flag="-fps_mode"):
+    """MAN-17 `recheck`; `flag` is `passthrough` of FFMPEG_VERSION_LINE (FF-11) unless a test fakes another line."""
+    ranged = [] if length is None else ["-t", "%.3f" % length]
+    return shlex.join(
+        ["ffmpeg", "-ss", "%.3f" % start] + ranged
+        + ["-i", video, "-vf", f"fps=4:round=up:start_time=0,select=eq(n\\,{k})", flag, "passthrough"]
+        + ["-frames:v", "1", "-q:v", "2", f"{out_dir}/frame-{n:02d}-native.jpg"]
+    )
+
+
+def run_events(
+    monkeypatch, capsys, tmp_path, extra, samples, probe=EVENTS_PROBE, frames=None, display=None,
+    version=FFMPEG_VERSION_LINE,
+):
+    return run_main(
+        monkeypatch, capsys, tmp_path, EVENTS_ARGV + extra, static(4),
+        probe=probe, frames=frames, samples=samples, display=display, version=version,
+    )
+
+
+def run_events_exit(monkeypatch, capsys, tmp_path, argv, samples):
+    """main() with the fakes in place, for argv that argparse rejects; returns the Run with `code` and `err`."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / argv[0]).write_bytes(b"")
+    run = Run(monkeypatch, EVENTS_PROBE, static(4), None, None, None, None, samples)
+    monkeypatch.setattr(sys, "argv", ["seenby.py"] + argv)
+    with pytest.raises(SystemExit) as exc:
+        seenby.main()
+    run.code = exc.value.code
+    run.err = capsys.readouterr().err
+    return run
+
+
+@pytest.mark.spec("CLI-26")
+@pytest.mark.spec("CLI-27")
+def test_cli_26_27_events_selector_run_calls_change_grids_and_prints_its_lines(monkeypatch, capsys, tmp_path):
+    run = run_events(monkeypatch, capsys, tmp_path, [], events_two())
+    assert run.rc == 0
+    assert run.display_size_calls == [("clip.mp4", 160, 80)]
+    assert run.change_grids_calls == [("clip.mp4", 160, 80, 4, 0.0, None)]
+    assert run.thumbnails_calls == []
+    assert run.out == (
+        EVENTS_HEADER + "\n"
+        + "  7 samples at 4 per second, 3 changes, 0 pointer moves, selected 3/24\n"
+        + "  frames: 0.00 first, 1.00 change, 1.50 last\n"
+        + EVENTS_LAYOUT + "\n"
+        + "  contact sheets: out/sheet-01.jpg\n"
+        + MANIFEST_LINE.format(out_dir="out") + "\n"
+    )
+
+
+@pytest.mark.spec("MAN-17")
+@pytest.mark.spec("CLI-26")
+def test_man_17_cli_26_events_selector_manifest(monkeypatch, capsys, tmp_path):
+    monkeypatch.delenv("FFMPEG", raising=False)
+    run = run_events(monkeypatch, capsys, tmp_path, [], events_two())
+    assert run.rc == 0
+    assert run.save_samples_calls == [("clip.mp4", [0, 4, 6], [0.0, 1.0, 1.5], "out", 160, 4, 0.0, None)]
+    assert run.save_frames_calls == []
+    data = manifest()
+    assert list(data) == EVENTS_TOP_LEVEL_KEYS
+    analysis = data["analysis"]
+    assert list(analysis) == EVENTS_ANALYSIS_KEYS
+    assert analysis == {
+        "selector": "events",
+        "sample_fps": 4,
+        "samples": 7,
+        "cell": 8,
+        "pixel_threshold": 24,
+        "max_frames": 24,
+        "range": {"from": 0.0, "to": 2.0},
+        "segment": 120.0,
+        "changes": 3,
+        "shown": 3,
+        "pointer_moves": 0,
+        "blinking": [],
+    }
+    assert data["events"] == [
+        {"from": 0.25, "settled": 0.25, "until": 1.0, "region": [16, 16, 24, 24], "changed_px": 576, "shown": True},
+        {"from": 0.75, "settled": 0.75, "until": 1.5, "region": [96, 16, 24, 24], "changed_px": 576, "shown": True},
+        {"from": 1.25, "settled": 1.25, "until": 1.5, "region": [16, 16, 24, 24], "changed_px": 576, "shown": True},
+    ]
+    assert all(list(event) == EVENTS_EVENT_KEYS for event in data["events"])
+    assert all(list(frame) == EVENTS_FRAME_KEYS for frame in data["frames"])
+    assert data["frames"] == [
+        {
+            "n": n, "time": t, "file": f"frame-{n:02d}.jpg", "sheet": 1, "reason": r,
+            "recheck": events_recheck("clip.mp4", "out", n, k, 0.0),
+        }
+        for n, k, t, r in [(1, 0, 0.0, "first"), (2, 4, 1.0, "change"), (3, 6, 1.5, "last")]
+    ]
+    assert data["frames"][1]["recheck"] == (
+        "ffmpeg -ss 0.000 -i clip.mp4 -vf 'fps=4:round=up:start_time=0,select=eq(n\\,4)' "
+        "-fps_mode passthrough -frames:v 1 -q:v 2 out/frame-02-native.jpg"
+    )
+    assert data["segments"] == [{"n": 1, "from": 0.0, "to": 2.0, "frames": [1, 2, 3], "activity": 3}]
+
+
+@pytest.mark.spec("MAN-17")
+@pytest.mark.spec("FF-11")
+def test_man_17_ff_11_recheck_takes_vsync_before_ffmpeg_5_1(monkeypatch, capsys, tmp_path):
+    line = "ffmpeg version 4.4.1-static https://johnvansickle.com/ffmpeg/"
+    run = run_events(monkeypatch, capsys, tmp_path, [], events_two(), version=line)
+    assert run.rc == 0
+    data = manifest()
+    assert data["ffmpeg"] == line
+    assert [f["recheck"] for f in data["frames"]] == [
+        events_recheck("clip.mp4", "out", n, k, 0.0, flag="-vsync") for n, k in [(1, 0), (2, 4), (3, 6)]
+    ]
+    assert data["frames"][1]["recheck"] == (
+        "ffmpeg -ss 0.000 -i clip.mp4 -vf 'fps=4:round=up:start_time=0,select=eq(n\\,4)' "
+        "-vsync passthrough -frames:v 1 -q:v 2 out/frame-02-native.jpg"
+    )
+
+
+@pytest.mark.spec("CLI-27")
+def test_cli_27_changes_without_a_frame_are_named_with_their_range(monkeypatch, capsys, tmp_path):
+    run = run_events(monkeypatch, capsys, tmp_path, ["--max-frames", "2"], events_two())
+    assert run.rc == 0
+    assert run.out == (
+        EVENTS_HEADER + "\n"
+        + "  7 samples at 4 per second, 3 changes, 0 pointer moves, selected 2/2\n"
+        + "  frames: 0.00 first, 1.50 last\n"
+        + "  1 of 3 changes not shown within 2 frames (all of them would need 3); "
+        + "1 of them from 0.25 to 0.25 s: rerun with --from 0.00 --to 1.25\n"
+        + EVENTS_LAYOUT + "\n"
+        + "  contact sheets: out/sheet-01.jpg\n"
+        + MANIFEST_LINE.format(out_dir="out") + "\n"
+    )
+
+
+@pytest.mark.spec("MAN-17")
+def test_man_17_shown_counts_the_events_with_a_frame(monkeypatch, capsys, tmp_path):
+    run = run_events(monkeypatch, capsys, tmp_path, ["--max-frames", "2"], events_two())
+    assert run.rc == 0
+    data = manifest()
+    analysis = data["analysis"]
+    assert analysis["max_frames"] == 2
+    assert analysis["changes"] == 3
+    assert analysis["shown"] == 2
+    assert "events" in data
+    assert data["events"][0]["shown"] is False
+
+
+@pytest.mark.spec("CLI-27")
+def test_cli_27_no_change_gives_the_first_and_the_last_frame_only(monkeypatch, capsys, tmp_path):
+    run = run_events(monkeypatch, capsys, tmp_path, [], [S({})] * 6)
+    assert run.rc == 0
+    assert run.out == (
+        EVENTS_HEADER + "\n"
+        + "  6 samples at 4 per second, 0 changes, 0 pointer moves, selected 2/24\n"
+        + "  frames: 0.00 first, 1.25 last\n"
+        + "  no change: the first and the last frame only\n"
+        + EVENTS_LAYOUT + "\n"
+        + "  contact sheets: out/sheet-01.jpg\n"
+        + MANIFEST_LINE.format(out_dir="out") + "\n"
+    )
+
+
+@pytest.mark.spec("CLI-27")
+@pytest.mark.spec("MAN-17")
+def test_cli_27_no_change_except_pointer_like_moves_counts_them(monkeypatch, capsys, tmp_path):
+    run = run_events(monkeypatch, capsys, tmp_path, [], events_ptr())
+    assert run.rc == 0
+    assert run.out == (
+        EVENTS_HEADER + "\n"
+        + "  5 samples at 4 per second, 0 changes, 2 pointer moves, selected 2/24\n"
+        + "  frames: 0.00 first, 1.00 last\n"
+        + "  no change except 2 pointer-like moves (the pointer, or a small mark such as a radio dot): "
+        + "the first and the last frame only\n"
+        + EVENTS_LAYOUT + "\n"
+        + "  contact sheets: out/sheet-01.jpg\n"
+        + MANIFEST_LINE.format(out_dir="out") + "\n"
+    )
+    assert manifest()["analysis"].get("pointer_moves") == 2
+
+
+@pytest.mark.spec("CLI-27")
+def test_cli_27_one_sample_has_no_no_change_line(monkeypatch, capsys, tmp_path):
+    run = run_events(monkeypatch, capsys, tmp_path, [], [S({})])
+    assert run.rc == 0
+    assert run.out.splitlines()[:4] == [
+        EVENTS_HEADER,
+        "  1 samples at 4 per second, 0 changes, 0 pointer moves, selected 1/24",
+        "  frames: 0.00 first",
+        "  layout: wide, tile 160 px, 1x18 per sheet",
+    ]
+
+
+TOGGLE_BOXES = [box(1, 1, 2, 2), box(8, 1, 2, 2), box(15, 1, 2, 2)]
+
+
+def toggles(n, starts):
+    """`n` samples; the i-th start `k` changes TOGGLE_BOXES[i] at pair k and changes it back at pair k + 2."""
+    samples = [S({})] * n
+    for k, cells in zip(starts, TOGGLE_BOXES):
+        samples[k] = samples[k + 2] = S(cells)
+    return samples
+
+
+@pytest.mark.spec("CLI-27")
+@pytest.mark.parametrize(
+    "duration, starts, line",
+    [
+        (
+            20.0, [4, 60, 64],
+            "  3 of 6 changes not shown within 2 frames (all of them would need 5); "
+            "2 of them from 15.00 to 16.00 s: rerun with --from 14.00 --to 17.00",
+        ),
+        (
+            30.0, [2, 100],
+            "  2 of 4 changes not shown within 2 frames (all of them would need 4); "
+            "1 of them from 0.50 to 0.50 s: rerun with --from 0.00 --to 1.50",
+        ),
+        (
+            20.0, [4, 44],
+            "  2 of 4 changes not shown within 2 frames (all of them would need 4); "
+            "2 of them from 1.00 to 11.00 s: rerun with --from 0.00 --to 12.00",
+        ),
+        (
+            10.0, [37],
+            "  1 of 2 changes not shown within 2 frames (all of them would need 3); "
+            "1 of them from 9.25 to 9.25 s: rerun with --from 8.25 --to 10.00",
+        ),
+    ],
+    ids=["largest-run-wins", "tie-takes-the-earliest", "ten-seconds-apart-is-one-run", "clamped-at-the-end"],
+)
+def test_cli_27_not_shown_line_names_the_largest_run_of_missed_changes(
+    monkeypatch, capsys, tmp_path, duration, starts, line
+):
+    samples = toggles(int(duration * 4) + 1, starts)
+    run = run_events(monkeypatch, capsys, tmp_path, ["--max-frames", "2"], samples, probe=(duration, 160, 80))
+    assert run.rc == 0
+    assert run.out.splitlines()[3] == line
+
+
+@pytest.mark.spec("CLI-27")
+def test_cli_27_the_to_of_the_hint_is_rounded_down_to_stay_inside_the_video(monkeypatch, capsys, tmp_path):
+    late = [S({}), S({}), S({}), S(box(2, 2, 3, 3)), S({}), S(box(2, 2, 3, 3)), S({})]
+    run = run_events(monkeypatch, capsys, tmp_path, ["--max-frames", "2"], late, probe=(1.618, 160, 80))
+    assert run.rc == 0
+    assert run.out.splitlines()[2:4] == [
+        "  frames: 0.00 first, 1.50 last",
+        "  1 of 2 changes not shown within 2 frames (all of them would need 3); "
+        "1 of them from 0.75 to 0.75 s: rerun with --from 0.00 --to 1.61",
+    ]
+
+
+@pytest.mark.spec("CLI-27")
+def test_cli_27_dry_run_stops_after_the_layout_line(monkeypatch, capsys, tmp_path):
+    run = run_events(monkeypatch, capsys, tmp_path, ["--dry-run"], events_two())
+    assert run.rc == 0
+    assert run.out == (
+        EVENTS_HEADER + "\n"
+        + "  7 samples at 4 per second, 3 changes, 0 pointer moves, selected 3/24\n"
+        + "  frames: 0.00 first, 1.00 change, 1.50 last\n"
+        + EVENTS_LAYOUT + "\n"
+    )
+    assert len(run.change_grids_calls) == 1
+    assert run.save_samples_calls == []
+    assert run.save_frames_calls == []
+    assert run.contact_sheets_calls == []
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.spec("CLI-26")
+@pytest.mark.spec("CLI-27")
+def test_cli_26_27_range_goes_to_change_grids_and_shifts_the_times(monkeypatch, capsys, tmp_path):
+    run = run_events(monkeypatch, capsys, tmp_path, ["--from", "1"], events_two(), probe=(3.0, 160, 80))
+    lines = run.out.splitlines()
+    assert run.rc == 0
+    assert run.change_grids_calls == [("clip.mp4", 160, 80, 4, 1.0, 2.0)]
+    assert lines[0] == "clip.mp4: 3.0 s, 160x80, landscape"
+    assert lines[1] == "  range: 1.0-3.0 s"
+    assert lines[2] == "  7 samples at 4 per second, 3 changes, 0 pointer moves, selected 3/24"
+    assert lines[3] == "  frames: 1.00 first, 2.00 change, 2.50 last"
+    assert run.save_samples_calls == [("clip.mp4", [0, 4, 6], [1.0, 2.0, 2.5], "out", 160, 4, 1.0, 2.0)]
+    frames = manifest()["frames"]
+    assert [f["recheck"] for f in frames] == [
+        events_recheck("clip.mp4", "out", n, k, 1.0, 2.0) for n, k in [(1, 0), (2, 4), (3, 6)]
+    ]
+    assert frames[0]["recheck"] == (
+        "ffmpeg -ss 1.000 -t 2.000 -i clip.mp4 -vf 'fps=4:round=up:start_time=0,select=eq(n\\,0)' "
+        "-fps_mode passthrough -frames:v 1 -q:v 2 out/frame-01-native.jpg"
+    )
+
+
+@pytest.mark.spec("CLI-26")
+def test_cli_26_range_checks_come_before_change_grids(monkeypatch, capsys, tmp_path):
+    run = run_events(monkeypatch, capsys, tmp_path, ["--to", "5"], events_two())
+    assert run.rc == 1
+    assert "--to 5.0 is past the end of the video (2.0 s)" in run.err
+    assert run.display_size_calls == []
+    assert run.change_grids_calls == []
+
+
+@pytest.mark.spec("CLI-26")
+@pytest.mark.spec("MAN-17")
+def test_cli_26_rotated_stream_uses_the_display_size_everywhere(monkeypatch, capsys, tmp_path):
+    run = run_events(monkeypatch, capsys, tmp_path, [], events_two(), probe=(2.0, 80, 160), display=(160, 80))
+    assert run.rc == 0
+    assert run.display_size_calls == [("clip.mp4", 80, 160)]
+    assert run.change_grids_calls == [("clip.mp4", 160, 80, 4, 0.0, None)]
+    assert run.out.splitlines()[0] == "clip.mp4: 2.0 s, 160x80, landscape"
+    video = manifest()["video"]
+    assert video["width"] == 160
+    assert video["height"] == 80
+
+
+@pytest.mark.spec("CLI-26")
+@pytest.mark.parametrize(
+    "probe, display, size",
+    [
+        ((2.0, 6, 6), None, "6x6"),
+        ((2.0, 160, 7), None, "160x7"),
+        ((2.0, 6, 160), (160, 6), "160x6"),
+    ],
+)
+def test_cli_26_a_frame_under_one_cell_is_refused(monkeypatch, capsys, tmp_path, probe, display, size):
+    run = run_events(monkeypatch, capsys, tmp_path, [], events_two(), probe=probe, display=display)
+    assert run.rc == 1
+    assert f"clip.mp4: the frame ({size}) is smaller than 8x8 px; use the legacy selector" in run.err.splitlines()
+    assert run.change_grids_calls == []
+
+
+@pytest.mark.spec("CLI-26")
+def test_cli_26_save_samples_value_error_is_reported_with_the_video_name(monkeypatch, capsys, tmp_path):
+    error = ValueError("ffmpeg wrote 2 of 3 frames")
+    run = run_events(monkeypatch, capsys, tmp_path, [], events_two(), frames=error)
+    assert run.rc == 1
+    assert "clip.mp4: ffmpeg wrote 2 of 3 frames" in run.err.splitlines()
+    assert run.out.splitlines() == [
+        EVENTS_HEADER,
+        "  7 samples at 4 per second, 3 changes, 0 pointer moves, selected 3/24",
+        "  frames: 0.00 first, 1.00 change, 1.50 last",
+        EVENTS_LAYOUT,
+    ]
+    assert not (tmp_path / "out" / "frames.json").exists()
+
+
+@pytest.mark.spec("CLI-26")
+@pytest.mark.parametrize(
+    "extra",
+    [["--threshold", "5"], ["--max-gap", "2"], ["--block-k", "0"], ["--sample-fps", "4"]],
+)
+def test_cli_26_legacy_options_with_the_events_selector_are_a_usage_error(monkeypatch, capsys, tmp_path, extra):
+    run = run_events_exit(monkeypatch, capsys, tmp_path, EVENTS_ARGV + extra, events_two())
+    assert run.code == 2
+    assert LEGACY_ONLY in run.err
+    assert run.change_grids_calls == []
+
+
+@pytest.mark.spec("CLI-26")
+def test_cli_26_no_samples_is_a_decode_failure(monkeypatch, capsys, tmp_path):
+    run = run_events(monkeypatch, capsys, tmp_path, [], [])
+    assert run.rc == 1
+    assert "could not decode the video: no frames" in run.err
+
+
+@pytest.mark.spec("CLI-26")
+def test_cli_26_ffmpeg_failure_in_change_grids_names_the_grids_stage(monkeypatch, capsys, tmp_path):
+    error = subprocess.CalledProcessError(1, ["ffmpeg"], stderr="x\nboom\n")
+    run = run_events(monkeypatch, capsys, tmp_path, [], error)
+    assert run.rc == 1
+    assert "ffmpeg failed during grids (exit 1): boom" in run.err
+
+
+@pytest.mark.spec("CLI-26")
+def test_cli_26_unknown_selector_is_an_argparse_choices_error(monkeypatch, capsys, tmp_path):
+    run = run_events_exit(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--selector", "bogus"], events_two())
+    assert run.code == 2
+    assert "invalid choice" in run.err
+    assert "bogus" in run.err
+
+
+@pytest.mark.spec("CLI-26")
+@pytest.mark.parametrize(
+    "extra, thumbs",
+    [
+        ([], static(30)),
+        (["--threshold", "30"], steps(4, 8)),
+        (["--max-gap", "2", "--block-k", "0", "--sample-fps", "4"], blocky()),
+    ],
+)
+def test_cli_26_selector_legacy_changes_nothing(monkeypatch, capsys, tmp_path, extra, thumbs):
+    outputs = []
+    for name, selector in [("plain", []), ("legacy", ["--selector", "legacy"])]:
+        where = tmp_path / name
+        where.mkdir()
+        run = run_main(monkeypatch, capsys, where, ["clip.mp4", "out"] + extra + selector, thumbs)
+        assert run.rc == 0
+        assert run.change_grids_calls == []
+        assert run.save_samples_calls == []
+        outputs.append((run.out, run.err, run.save_frames_calls, run.contact_sheets_calls, manifest()))
+    assert outputs[0] == outputs[1]
+
+
+# -------- EVT-3: select_events cuts `until` where the box's cell means stop matching `settled`
+
+
+def events_flash():
+    return [M({}, {}), M(box(2, 2, 3, 1, 200), box(2, 2, 3, 1)), M({}, {}), M({}, {}), M({}, {})]
+
+
+@pytest.mark.spec("EVT-3")
+def test_evt_3_a_flash_that_goes_back_is_cut_at_its_last_sample():
+    result = seenby.select_events(events_flash(), GW, GH, 24)
+    expected = {"settled": 1, "until": 1}
+    assert result["frames"] == [(0, "first"), (1, "change"), (4, "last")]
+    assert len(result["events"]) == 1
+    assert event_fields(result["events"][0], expected) == expected
+
+
+@pytest.mark.spec("EVT-3")
+def test_evt_3_more_than_a_quarter_of_the_cells_beyond_hold_delta_cuts():
+    on = box(2, 2, 4, 2, 200)
+    samples = [
+        M({}, {}),
+        M(on, box(2, 2, 4, 2)),
+        M(on | {(2, 2): 0}, {}),
+        M(on | {(2, 2): 194}, {}),
+        M(on | box(2, 2, 3, 1, 0), {}),
+        M({}, {}),
+    ]
+    result = seenby.select_events(samples, GW, GH, 24)
+    expected = {"x": 16, "y": 16, "w": 32, "h": 16, "settled": 1, "until": 3}
+    assert result["frames"] == [(0, "first"), (3, "change"), (5, "last")]
+    assert len(result["events"]) == 1
+    assert event_fields(result["events"][0], expected) == expected
+
+
+@pytest.mark.spec("EVT-3")
+@pytest.mark.spec("CLI-27")
+@pytest.mark.spec("MAN-17")
+def test_evt_3_console_and_manifest_use_the_cut_until(monkeypatch, capsys, tmp_path):
+    run = run_events(monkeypatch, capsys, tmp_path, ["--max-frames", "2"], events_flash())
+    assert run.rc == 0
+    assert run.out == (
+        EVENTS_HEADER + "\n"
+        + "  5 samples at 4 per second, 1 changes, 0 pointer moves, selected 2/2\n"
+        + "  frames: 0.00 first, 1.00 last\n"
+        + "  1 of 1 changes not shown within 2 frames (all of them would need 3); "
+        + "1 of them from 0.25 to 0.25 s: rerun with --from 0.00 --to 1.25\n"
+        + EVENTS_LAYOUT + "\n"
+        + "  contact sheets: out/sheet-01.jpg\n"
+        + MANIFEST_LINE.format(out_dir="out") + "\n"
+    )
+    data = manifest()
+    assert data["analysis"]["changes"] == 1
+    assert data["analysis"]["shown"] == 0
+    assert data.get("events") == [
+        {"from": 0.25, "settled": 0.25, "until": 0.25, "region": [16, 16, 24, 8], "changed_px": 192, "shown": False}
+    ]
+
+
+# -------- EVT-4: select_events sets aside a one-cell-wide box that blinks between two looks, such as a text caret
+
+BLINK_ON = box(5, 2, 1, 4, 100)
+BLINK_C = box(5, 2, 1, 4, 60)
+
+
+def events_blink(on=BLINK_ON, change=BLINK_C):
+    """The spec's `blink`: a caret that appears at 1, 5, 9 and goes at 3, 7, each look on screen for two samples."""
+    return [M(on if k % 4 in (1, 2) else {}, change if k % 2 == 1 else {}) for k in range(10)]
+
+
+def blink_area(count, first, last, x=40, y=16, w=8, h=32):
+    return {"x": x, "y": y, "w": w, "h": h, "count": count, "first": first, "last": last}
+
+
+BLINK_BOX = {"x": 40, "y": 16, "w": 8, "h": 32}
+FIVE_CHANGE_FRAMES = [(0, "first"), (2, "change"), (4, "change"), (6, "change"), (8, "change"), (9, "last")]
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_a_box_one_cell_wide_blinking_between_two_looks_is_a_blinking_area():
+    result = seenby.select_events(events_blink(), GW, GH, 24)
+    assert result.get("blinking") == [blink_area(5, 1, 9)]
+    assert result["events"] == []
+    assert result["frames"] == [(0, "first"), (9, "last")]
+    assert result.get("needed") == 2
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_a_third_look_is_not_a_blinking_area():
+    three = events_blink()
+    three[5] = (grid(box(5, 2, 1, 4, 180)), three[5][1])
+    three[6] = (grid(box(5, 2, 1, 4, 180)), three[6][1])
+    result = seenby.select_events(three, GW, GH, 24)
+    assert result.get("blinking") == []
+    assert [event_fields(e, BLINK_BOX) for e in result["events"]] == [BLINK_BOX] * 5
+    assert [round(e["px"], 4) for e in result["events"]] == [60.2353] * 5
+    assert [(e["settled"], e["until"]) for e in result["events"]] == [(1, 2), (3, 4), (5, 6), (7, 8), (9, 9)]
+    assert result["frames"] == FIVE_CHANGE_FRAMES
+    assert result.get("needed") == 6
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_a_caret_that_stops_with_a_long_last_event_is_still_a_blinking_area():
+    samples = events_blink() + [M(BLINK_ON, {}), M({}, BLINK_C)] + [M({}, {})] * 4
+    result = seenby.select_events(samples, GW, GH, 24)
+    assert result["frames"] == [(0, "first"), (15, "last")]
+    assert result["events"] == []
+    assert result.get("blinking") == [blink_area(6, 1, 11)]
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_a_caret_that_pauses_and_resumes_is_one_blinking_area():
+    blink = events_blink()
+    samples = blink[:8] + [M({}, {})] * 8 + blink[:8]
+    result = seenby.select_events(samples, GW, GH, 24)
+    assert result["frames"] == [(0, "first"), (23, "last")]
+    assert result["events"] == []
+    assert result.get("blinking") == [blink_area(8, 1, 23)]
+
+
+@pytest.mark.spec("EVT-4")
+@pytest.mark.parametrize(
+    "on, change",
+    [(box(5, 2, 2, 4, 100), box(5, 2, 2, 4, 30)), (BLINK_ON, box(5, 2, 1, 4, 128))],
+    ids=["two-cells-wide", "128.502-px"],
+)
+def test_evt_4_a_wider_or_heavier_box_is_not_a_blinking_area(on, change):
+    result = seenby.select_events(events_blink(on, change), GW, GH, 24)
+    assert result.get("blinking") == []
+    assert len(result["events"]) == 5
+    assert result["frames"] == FIVE_CHANGE_FRAMES
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_three_changes_are_not_a_blinking_area():
+    samples = events_blink()[:7] + [M({}, {})] * 3
+    result = seenby.select_events(samples, GW, GH, 24)
+    assert result.get("blinking") == []
+    assert [event_fields(e, BLINK_BOX) for e in result["events"]] == [BLINK_BOX] * 3
+    assert [e["until"] for e in result["events"]] == [2, 4, 6]
+    assert result["frames"] == [(0, "first"), (2, "change"), (4, "change"), (6, "change"), (9, "last")]
+
+
+TYPED_CARET = {(6, 1): 100, (6, 2): 120, (6, 3): 120, (6, 4): 100}
+TYPED_CC = box(6, 1, 1, 4, 60)
+
+
+def caret_after(text, change):
+    """`text` typed at 1 (`change` its change plane), then the spec's CARET blinking in cell column 6 from 3."""
+    return [M({}, {}), M(text, change)] + [
+        M(text | (TYPED_CARET if k % 4 in (0, 3) else {}), TYPED_CC if k % 2 == 1 else {}) for k in range(2, 12)
+    ]
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_a_caret_dropped_from_content_no_longer_cuts_the_typed_text():
+    typed = caret_after(box(2, 2, 5, 2, 150), box(2, 2, 5, 2))
+    result = seenby.select_events(typed, GW, GH, 2)
+    expected = {"start": 1, "settled": 1, "until": 11, "x": 16, "y": 16, "w": 40, "h": 16, "px": 640.0}
+    assert result["frames"] == [(0, "first"), (11, "last")]
+    assert result.get("blinking") == [blink_area(5, 3, 11, x=48, y=8)]
+    assert len(result["events"]) == 1
+    assert event_fields(result["events"][0], expected) == approx_px(expected)
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_cells_inside_a_blinking_area_are_left_out_of_evt_3():
+    short = caret_after(box(5, 2, 2, 2, 150), box(5, 2, 2, 2))
+    result = seenby.select_events(short, GW, GH, 2)
+    expected = {"start": 1, "settled": 1, "until": 11, "x": 40, "y": 16, "w": 16, "h": 16, "px": 256.0}
+    assert result["frames"] == [(0, "first"), (11, "last")]
+    assert result.get("blinking") == [blink_area(5, 3, 11, x=48, y=8)]
+    assert len(result["events"]) == 1
+    assert event_fields(result["events"][0], expected) == approx_px(expected)
+
+
+@pytest.mark.spec("EVT-4")
+@pytest.mark.parametrize(
+    "on, change, region, px",
+    [
+        (box(2, 5, 10, 1, 100), box(2, 5, 10, 1, 60), {"x": 16, "y": 40, "w": 80, "h": 8}, 150.5882),
+        (box(5, 0, 1, 9, 100), box(5, 0, 1, 9, 30), {"x": 40, "y": 0, "w": 8, "h": 72}, 67.7647),
+    ],
+    ids=["80x8-underline", "8x72-taller-than-caret-h"],
+)
+def test_evt_4_only_a_box_one_cell_wide_and_at_most_caret_h_tall_can_blink(on, change, region, px):
+    result = seenby.select_events(events_blink(on, change), GW, GH, 24)
+    assert result.get("blinking") == []
+    assert [event_fields(e, region) for e in result["events"]] == [region] * 5
+    assert [round(e["px"], 4) for e in result["events"]] == [px] * 5
+    assert result["frames"] == FIVE_CHANGE_FRAMES
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_a_box_exactly_caret_h_tall_can_blink():
+    result = seenby.select_events(events_blink(box(5, 0, 1, 8, 100), box(5, 0, 1, 8, 30)), GW, GH, 24)
+    assert result.get("blinking") == [blink_area(5, 1, 9, y=0, h=64)]
+    assert result["events"] == []
+    assert result["frames"] == [(0, "first"), (9, "last")]
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_a_pair_left_with_the_pointer_after_a_blink_is_a_pointer_move():
+    pa, pb = box(10, 2, 3, 4, 170), box(15, 5, 3, 4, 160)
+    ptr_blink = [
+        M(BLINK_ON if k % 4 in (1, 2) else {}, (BLINK_C | pa | pb) if k == 3 else (BLINK_C if k % 2 == 1 else {}))
+        for k in range(10)
+    ]
+    result = seenby.select_events(ptr_blink, GW, GH, 24)
+    assert result["frames"] == [(0, "first"), (9, "last")]
+    assert result["events"] == []
+    assert result.get("pointer_moves") == 1
+    assert result.get("blinking") == [blink_area(5, 1, 9)]
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_a_change_that_is_not_faint_splits_the_blinks_into_two_areas():
+    on2, char = box(5, 2, 1, 4, 180), box(5, 2, 1, 4, 50)
+    narrow = [
+        M(
+            (BLINK_ON if k % 4 in (1, 2) else {}) if k < 9 else (on2 if (k - 9) // 2 % 2 == 0 else char),
+            box(5, 2, 1, 4, 200) if k == 9 else (BLINK_C if k % 2 == 1 else {}),
+        )
+        for k in range(19)
+    ]
+    result = seenby.select_events(narrow, GW, GH, 24)
+    expected = dict(BLINK_BOX, start=9, settled=9, until=18)
+    assert result["frames"] == [(0, "first"), (18, "last")]
+    assert result.get("blinking") == [blink_area(4, 1, 7), blink_area(4, 11, 17)]
+    assert len(result["events"]) == 1
+    assert event_fields(result["events"][0], expected) == expected
+    assert round(result["events"][0]["px"], 4) == 200.7843
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_a_third_look_from_a_state_the_run_never_had_starts_the_next_run():
+    pl, pr, ib = box(12, 2, 2, 4, 150), box(4, 2, 2, 4, 150), box(4, 2, 2, 4, 60)
+    rest = [
+        M(
+            (BLINK_ON if k % 4 in (1, 2) else {}) if k < 8 else ib | (box(5, 2, 1, 4, 160) if k % 4 in (1, 2) else {}),
+            (pl | pr) if k == 8 else (BLINK_C if k % 2 == 1 else {}),
+        )
+        for k in range(18)
+    ]
+    result = seenby.select_events(rest, GW, GH, 24)
+    assert result["frames"] == [(0, "first"), (17, "last")]
+    assert result["events"] == []
+    assert result.get("pointer_moves") == 1
+    assert result.get("blinking") == [blink_area(4, 1, 7), blink_area(5, 9, 17)]
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_a_third_look_made_from_a_look_of_the_run_belongs_to_no_run():
+    dot = [
+        M(
+            (BLINK_ON if k % 4 in (1, 2) else {}) if k < 9 else box(5, 2, 1, 4, 130 if k % 4 in (1, 2) else 30),
+            box(5, 2, 1, 4, 90) if k == 9 else (BLINK_C if k % 2 == 1 else {}),
+        )
+        for k in range(19)
+    ]
+    result = seenby.select_events(dot, GW, GH, 24)
+    expected = dict(BLINK_BOX, start=9, settled=9, until=18)
+    assert result["frames"] == [(0, "first"), (18, "last")]
+    assert result.get("blinking") == [blink_area(4, 1, 7), blink_area(4, 11, 17)]
+    assert len(result["events"]) == 1
+    assert event_fields(result["events"][0], expected) == expected
+    assert round(result["events"][0]["px"], 4) == 90.3529
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_a_third_look_is_checked_against_the_run_in_sample_start_minus_1():
+    """The dot of the `dot` row drawn over two pairs, top half at 9 and bottom half at 10 (start 9, settled 10), then
+    the caret changing at 12, 14, 16 and 18. Sample 8 has the run's "off" look; the half-drawn sample 9 differs from
+    both of the run's looks, so taking it would start a run of five blinks at 10."""
+    samples = []
+    for k in range(20):
+        if k < 9:
+            means, change = (BLINK_ON if k % 4 in (1, 2) else {}), (BLINK_C if k % 2 == 1 else {})
+        elif k == 9:
+            means, change = box(5, 2, 1, 2, 130), box(5, 2, 1, 2, 90)
+        else:
+            means = box(5, 2, 1, 4, 130 if k % 4 in (2, 3) else 30)
+            change = box(5, 4, 1, 2, 90) if k == 10 else (BLINK_C if k % 2 == 0 else {})
+        samples.append(M(means, change))
+    result = seenby.select_events(samples, GW, GH, 24)
+    expected = dict(BLINK_BOX, start=9, settled=10, until=19)
+    assert result["frames"] == [(0, "first"), (19, "last")]
+    assert result.get("blinking") == [blink_area(4, 1, 7), blink_area(4, 12, 18)]
+    assert len(result["events"]) == 1
+    assert event_fields(result["events"][0], expected) == expected
+    assert round(result["events"][0]["px"], 4) == 90.3529
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_a_faint_event_with_the_look_of_the_runs_only_event_replaces_it():
+    same = [
+        M(
+            BLINK_ON if k in (1, 2, 3, 4) or (k >= 7 and k % 4 in (3, 0)) else {},
+            BLINK_C if k in (1, 3) or (k >= 5 and k % 2 == 1) else {},
+        )
+        for k in range(16)
+    ]
+    result = seenby.select_events(same, GW, GH, 24)
+    expected = dict(BLINK_BOX, start=1, settled=1, until=15)
+    assert result["frames"] == [(0, "first"), (15, "last")]
+    assert result.get("blinking") == [blink_area(7, 3, 15)]
+    assert len(result["events"]) == 1
+    assert event_fields(result["events"][0], expected) == expected
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_areas_outside_an_events_columns_leave_all_its_cells_in_evt_3():
+    tx = box(2, 2, 2, 2, 150)
+    two_carets = [
+        M(
+            (
+                {} if k < 1 else tx | ({(2, 2): 151} if k >= 12 else {})
+                | (box(7, 1, 1, 4, 100) if k >= 3 and (k - 3) // 4 % 2 == 0 else {})
+                | (box(10, 1, 1, 4, 100) if k >= 5 and (k - 5) // 4 % 2 == 0 else {})
+            ),
+            box(2, 2, 2, 2) if k == 1
+            else box(7, 1, 1, 4, 60) if k >= 3 and (k - 3) % 4 == 0
+            else box(10, 1, 1, 4, 60) if k >= 5 and (k - 5) % 4 == 0
+            else {},
+        )
+        for k in range(24)
+    ]
+    result = seenby.select_events(two_carets, GW, GH, 24)
+    expected = {"start": 1, "settled": 1, "until": 23, "x": 16, "y": 16, "w": 16, "h": 16, "px": 256.0}
+    assert result["frames"] == [(0, "first"), (23, "last")]
+    assert result.get("blinking") == [blink_area(6, 3, 23, x=56, y=8), blink_area(5, 5, 21, x=80, y=8)]
+    assert len(result["events"]) == 1
+    assert event_fields(result["events"][0], expected) == approx_px(expected)
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_evt_3_compares_the_cells_of_an_area_that_does_not_overlap_the_event_in_time():
+    mark = box(5, 2, 1, 4, 40)
+    after_stop = events_blink() + [
+        M(BLINK_ON, {}), M({}, BLINK_C), M({}, {}), M({}, {}), M(mark, mark), M(mark, {}),
+    ] + [M({}, {})] * 4
+    result = seenby.select_events(after_stop, GW, GH, 24)
+    expected = dict(BLINK_BOX, start=14, settled=14, until=15)
+    assert result["frames"] == [(0, "first"), (15, "change"), (19, "last")]
+    assert result.get("blinking") == [blink_area(6, 1, 11)]
+    assert len(result["events"]) == 1
+    assert event_fields(result["events"][0], expected) == expected
+    assert round(result["events"][0]["px"], 4) == 40.1569
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_blobs_smaller_than_a_blink_inside_its_box_are_removed_over_its_pairs():
+    """Each caret appearance is drawn over two pairs, top half then bottom half, so the blinks at 2, 7 and 12 span
+    pairs 1-2, 6-7 and 11-12 and none of their blobs has the blink's box."""
+    phases = [
+        (box(5, 2, 1, 2, 100), box(5, 2, 1, 2, 60)),
+        (BLINK_ON, box(5, 4, 1, 2, 60)),
+        (BLINK_ON, {}),
+        ({}, BLINK_C),
+        ({}, {}),
+    ]
+    samples = [M({}, {})] + [M(*phases[(k - 1) % 5]) for k in range(1, 14)]
+    result = seenby.select_events(samples, GW, GH, 24)
+    assert result.get("blinking") == [blink_area(5, 2, 12)]
+    assert result["events"] == []
+    assert result["frames"] == [(0, "first"), (13, "last")]
+    assert result.get("pointer_moves") == 0
+
+
+def alternating(on, change, gap, looks=5):
+    """`change` at pairs 1, 1 + gap, ... of `looks * gap + 1` samples; the means show `on` after the 1st, 3rd, ...
+    change and nothing after the 2nd, 4th, ...: `looks` alternating looks of `gap` samples each."""
+    return [M({}, {})] + [
+        M(on if (k - 1) // gap % 2 == 0 else {}, change if (k - 1) % gap == 0 else {})
+        for k in range(1, looks * gap + 1)
+    ]
+
+
+@pytest.mark.spec("EVT-4")
+@pytest.mark.parametrize(
+    "samples, blinking, events",
+    [
+        (alternating(box(3, 2, 4, 1, 100), box(3, 2, 4, 1, 60), 2), [], 5),
+        (alternating(BLINK_ON, BLINK_C, 4), [blink_area(5, 1, 17)], 0),
+        (alternating(BLINK_ON, BLINK_C, 5), [], 5),
+        ([M({}, BLINK_C if k % 2 == 1 else {}) for k in range(10)], [], 5),
+    ],
+    ids=["one-cell-tall-four-cells-wide", "looks-of-4-samples", "looks-of-5-samples", "one-look-only"],
+)
+def test_evt_4_a_thin_box_counts_with_brief_events_and_two_looks(samples, blinking, events):
+    result = seenby.select_events(samples, GW, GH, 24)
+    assert result.get("blinking") == blinking
+    assert len(result["events"]) == events
+
+
+@pytest.mark.spec("EVT-4")
+def test_evt_4_blinking_areas_come_in_the_order_of_their_first_event():
+    right_on, right_change = box(15, 2, 1, 4, 100), box(15, 2, 1, 4, 60)
+    samples = []
+    for k in range(14):
+        left = k >= 4 and (k - 4) // 2 % 2 == 0
+        right = k % 4 in (1, 2)
+        change = right_change if k % 2 == 1 else BLINK_C if k >= 4 else {}
+        samples.append(M((BLINK_ON if left else {}) | (right_on if right else {}), change))
+    result = seenby.select_events(samples, GW, GH, 24)
+    assert result.get("blinking") == [blink_area(7, 1, 13, x=120), blink_area(5, 4, 12)]
+    assert result["events"] == []
+    assert result["frames"] == [(0, "first"), (13, "last")]
+
+
+@pytest.mark.spec("EVT-4")
+@pytest.mark.spec("CLI-27")
+@pytest.mark.spec("MAN-17")
+def test_evt_4_cli_27_man_17_a_blinking_area_is_named_and_listed(monkeypatch, capsys, tmp_path):
+    run = run_events(monkeypatch, capsys, tmp_path, [], events_blink())
+    assert run.rc == 0
+    assert run.out == (
+        EVENTS_HEADER + "\n"
+        + "  10 samples at 4 per second, 0 changes, 0 pointer moves, selected 2/24\n"
+        + "  frames: 0.00 first, 2.25 last\n"
+        + "  ignored a blinking area at 40,16 8x32 px (5 times from 0.25 to 2.25 s): "
+        + "a text caret, or a small mark toggled back and forth\n"
+        + "  no change: the first and the last frame only\n"
+        + EVENTS_LAYOUT + "\n"
+        + "  contact sheets: out/sheet-01.jpg\n"
+        + MANIFEST_LINE.format(out_dir="out") + "\n"
+    )
+    data = manifest()
+    assert data["analysis"]["changes"] == 0
+    assert data["analysis"].get("blinking") == [{"region": [40, 16, 8, 32], "count": 5, "from": 0.25, "to": 2.25}]
+    assert data.get("events") == []
+
+
+@pytest.mark.spec("CLI-27")
+@pytest.mark.spec("MAN-17")
+def test_cli_27_man_17_blinking_times_are_shifted_by_the_range_start(monkeypatch, capsys, tmp_path):
+    run = run_events(monkeypatch, capsys, tmp_path, ["--from", "1"], events_blink(), probe=(4.0, 160, 80))
+    assert run.rc == 0
+    assert run.out.splitlines()[3:5] == [
+        "  frames: 1.00 first, 3.25 last",
+        "  ignored a blinking area at 40,16 8x32 px (5 times from 1.25 to 3.25 s): "
+        "a text caret, or a small mark toggled back and forth",
+    ]
+    assert manifest()["analysis"].get("blinking") == [
+        {"region": [40, 16, 8, 32], "count": 5, "from": 1.25, "to": 3.25}
+    ]
+
+
+# -------- FF-11 (passthrough) and the bytes-like samples of the step 12 vocabulary
+
+
+@pytest.mark.spec("FF-11")
+@pytest.mark.parametrize(
+    "version, option",
+    [
+        ("ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers", "-fps_mode"),
+        ("ffmpeg version n9.0.2-10-g51c4a23d74-20260926 Copyright (c) 2000-2026 the FFmpeg developers", "-fps_mode"),
+        ("ffmpeg version 5.1", "-fps_mode"),
+        ("ffmpeg version 10.0", "-fps_mode"),
+        ("ffmpeg version 7.1-full_build-www.gyan.dev", "-fps_mode"),
+        ("ffmpeg version 4.4.1-static https://johnvansickle.com/ffmpeg/", "-vsync"),
+        ("ffmpeg version 5.0.1", "-vsync"),
+        ("ffmpeg version n4.3.2", "-vsync"),
+        ("ffmpeg version N-112345-gabcdef0", "-fps_mode"),
+        ("ffmpeg version 2024-10-10-git-0f5592cfc7-full_build-www.gyan.dev", "-fps_mode"),
+        ("", "-fps_mode"),
+        ("avconv version 12", "-fps_mode"),
+    ],
+)
+def test_ff_11_passthrough_option_by_ffmpeg_version(version, option):
+    assert seenby.passthrough(version) == option
+
+
+@pytest.mark.spec("PCK-4")
+@pytest.mark.spec("EVT-3")
+@pytest.mark.parametrize(
+    "samples, frames",
+    [
+        (events_two(), [(0, "first"), (4, "change"), (6, "last")]),
+        (
+            [
+                M({}, {}),
+                M(box(2, 2, 4, 2, 200), box(2, 2, 4, 2)),
+                M(box(2, 2, 4, 2, 200) | {(2, 2): 0}, {}),
+                M(box(2, 2, 4, 2, 200) | {(2, 2): 194}, {}),
+                M(box(2, 2, 4, 2, 200) | box(2, 2, 3, 1, 0), {}),
+                M({}, {}),
+            ],
+            [(0, "first"), (3, "change"), (5, "last")],
+        ),
+    ],
+    ids=["two", "on"],
+)
+def test_pck_4_samples_may_be_memoryviews(samples, frames):
+    views = [(memoryview(mean), memoryview(change)) for mean, change in samples]
+    assert seenby.select_events(views, GW, GH, 24)["frames"] == frames

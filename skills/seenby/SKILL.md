@@ -20,10 +20,11 @@ Always start with no options. The console tells you what happened:
 
 ```
 demo.mp4: 27.1 s, 814x872, portrait
-  54 thumbnails, selected 12/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)
-  frames: 0.0 first, 3.0 timer, 3.5 block, 6.5 timer, ..., 26.5 last
+  54 thumbnails, selected 19/24 (threshold 12.0 -> 12.0, max gap 3.0 -> 3.0 s)
+  frames: 0.0 first, 3.0 timer, 3.5 block, 6.5 timer, ..., 25.5 timer, 26.5 last
+  quiet stretches at a lower threshold: 12.0-26.5 s at 3.4 (largest change 10.3)
   layout: window, tile 516 px, 3x2 per sheet
-  contact sheets: out/sheet-01.jpg, out/sheet-02.jpg
+  contact sheets: out/sheet-01.jpg, out/sheet-02.jpg, out/sheet-03.jpg, out/sheet-04.jpg
   manifest: out/frames.json. Sheets are for meaning; read digits from the native frame, see "recheck" in the manifest.
 ```
 
@@ -45,12 +46,31 @@ digit, amount, ID, or code, run the frame's `recheck` command from `frames.json`
 
 ## When the console warns you
 
-- `all frames taken by the timer: the largest change between thumbnails was 4.4, under the threshold 12.0; --threshold 1.4: 9 content frames ...` means the picture did change, but too little for the default threshold. That happens on wide, light screens, where a change is thin text on white. Rerun with the `--threshold` the line names and read the new sheets. When the line stops after `under the threshold 12.0` with no suggestion, the largest change was 1.0 or less, about the size of a cursor move, and the timer frames are the whole story.
+- `quiet stretches at a lower threshold: ...` is not a problem. On a light screen a change can be too small for the default threshold, so seenby looked at those seconds again with a lower one; the frames there are real changes. Nothing to do.
+- `all frames taken by the timer: the largest change between thumbnails was 4.4, under the threshold 12.0; --threshold 1.4: 9 content frames ...` means the picture did change, too little for the default threshold, and the lower one did not fit the cap of frames. Rerun with the `--threshold` the line names, with `--from S --to S` around the part you need, and read the new sheets. When the line stops after `under the threshold 12.0` with no suggestion, the largest change was 1.0 or less. That is not proof that nothing happened: on a wide or high-resolution window a checkbox, a radio button or a small badge toggling moves this measure by only 0.1-0.3. If the recording is about such controls, rerun with `--threshold 0.2` on the part you need, or read the native frames around the moments in question.
 - `all frames taken by the timer: the threshold contributed nothing ... try --max-frames` means the recording is long and the cap of 24 frames raised the threshold until only timer frames remained. Pick the stretch you care about and rerun with `--from S --to S`; `segments[]` in `frames.json` shows what is where.
 - `N contact sheets are more than 4` means a lot of change; read them all or narrow with `--from/--to`.
 - Fewer frames than you expected around a moment the user asked about: rerun with `--dry-run --from S --to S`
   around it (prints the times it would pick, extracts nothing), then without `--dry-run`. `--sample-fps 4`
   looks twice as often for short events; a state shorter than half a second can still be missed.
+
+## UI recordings: `--selector events`
+
+For a recording of an interface (a browser or app window, a phone screen) where the user clicks, types, toggles checkboxes, opens dropdowns or dialogs, run with `--selector events`, and use it as the second run whenever the default output is mostly `timer` frames:
+
+```
+python3 <skill-dir>/seenby.py <recording> <out-dir> --selector events
+```
+
+It finds changes by counting changed pixels at native resolution, so it sees a checkbox or a digit that the default selector's 32x32 thumbnails average away, and it keeps the frame after each change settles instead of a frame every 3 seconds. Measured on 15 real recordings, agents reading its output answered 94.4% of questions right against 80.0% with the default, with 1 confidently wrong answer against 10.
+
+- `frames[].reason`: `first`, `change` (the screen after a change settled), `state` (a short state inside a quick series, such as the first click of a double click), `during` and `fill` (inside a long continuous change such as a scroll), `last`. There are no timer frames. A stretch without a frame had no change the selector could see, unless the console says that changes were not shown.
+- `events` at the end of `frames.json` lists every change found: `settled` and `until` (the seconds the new state was on screen), `region` (`[x, y, w, h]` in native pixels: where to look on the frame) and `shown` (whether a kept frame shows it).
+- `N of M changes not shown within 24 frames (all of them would need K); C of them from A to B s: rerun with --from A' --to B'` means the recording had more states than the cap. Rerun with the `--from` and `--to` it names (and `--selector events`) to see them.
+- `no change: the first and the last frame only` means nothing on screen changed. `no change except N pointer-like moves (...)` means only pointer-sized marks moved; that is usually the pointer, but a radio button's dot jumping between two options looks the same, so if the question is about such a control, compare it on the first and the last frame (run their `recheck` for the native frames); the output does not say when the moves happened.
+- `ignored a blinking area at X,Y WxH px (N times from A to B s): a text caret, or a small mark toggled back and forth` means a one-cell-wide spot kept flipping between the same two looks between A and B s and was not counted as a change. Usually that is the caret of a focused field. If the question is about a small mark at that place, rerun that stretch with `--from A --to B` without `--selector events`: there may be no frame of it now.
+- `recheck` extracts exactly the analysed frame at full resolution; use it for digits as above.
+- `--threshold`, `--max-gap`, `--block-k` and `--sample-fps` belong to the default selector; with `--selector events` they are an error.
 
 ## Options you may need
 
