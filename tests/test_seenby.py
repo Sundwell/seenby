@@ -727,10 +727,10 @@ NOMINAL_COLS = {"phone": 6, "window": 3, "wide": 2}
 LAYOUT_ROWS = [
     ((814, 872, 12), {}, ("window", 516, 3, 2, 2)),
     ((2554, 1334, 10), {}, ("wide", 776, 2, 3, 2)),
-    ((526, 514, 3), {}, ("window", 516, 3, 3, 1)),
+    ((526, 514, 3), {}, ("window", 516, 3, 2, 1)),
     ((720, 1280, 14), {}, ("phone", 256, 6, 3, 1)),
     ((576, 1280, 3), {}, ("phone", 256, 3, 2, 1)),
-    ((2560, 1228, 8), {}, ("wide", 776, 2, 4, 1)),
+    ((2560, 1228, 8), {}, ("wide", 776, 2, 3, 2)),
     ((1636, 1228, 5), {}, ("window", 516, 3, 3, 1)),
     ((576, 1280, 9), {}, ("phone", 256, 6, 2, 1)),
     ((576, 1280, 20), {}, ("phone", 256, 6, 2, 2)),
@@ -739,7 +739,7 @@ LAYOUT_ROWS = [
     ((1601, 1000, 6), {}, ("wide", 776, 2, 3, 1)),
     ((750, 1000, 6), {}, ("window", 516, 3, 2, 1)),
     ((749, 1000, 6), {}, ("phone", 256, 6, 4, 1)),
-    ((500, 500, 6), {}, ("window", 500, 3, 3, 1)),
+    ((500, 500, 6), {}, ("window", 500, 3, 2, 1)),
     ((800, 600, 6, 1200, 2), {}, ("window", 393, 3, 2, 1)),
     ((800, 600, 6), {"tile_width": 300}, ("window", 300, 5, 6, 1)),
     ((800, 600, 1), {}, ("window", 516, 1, 3, 1)),
@@ -784,6 +784,7 @@ def test_lay_2_5_sheet_width_margin_and_padding_constants():
 @pytest.mark.spec("LAY-2")
 @pytest.mark.spec("LAY-3")
 @pytest.mark.spec("LAY-4")
+@pytest.mark.spec("LBL-3")
 @pytest.mark.parametrize("args, kwargs, expected", LAYOUT_ROWS, ids=LAYOUT_IDS)
 def test_lay_1_4_example_rows(args, kwargs, expected):
     result = seenby.layout(*args, **kwargs)
@@ -864,24 +865,25 @@ def test_lay_2_requested_tile_decides_the_columns(tile_width, cols):
     "args, kwargs, rows",
     [
         ((1600, 1000, 6), {}, 4),
-        ((1032, 1033, 6), {}, 3),
+        ((1032, 989, 6), {}, 3),
         ((814, 872, 12), {}, 2),
         ((100, 2000, 5), {}, 1),
         ((800, 600, 6, 1200, 2), {}, 2),
         ((800, 600, 30), {"rows": 1}, 1),
         ((800, 600, 6), {"rows": 5}, 5),
     ],
-    ids=["round-half-even-322", "round-half-even-516", "two-rows", "taller-than-sheet", "rows-2-given", "rows-1-given", "rows-5-given"],
+    ids=["round-half-even-322", "round-half-even-494", "two-rows", "taller-than-sheet", "rows-2-given", "rows-1-given", "rows-5-given"],
 )
 def test_lay_3_rows_fill_the_sheet_height_or_are_used_as_given(args, kwargs, rows):
     assert seenby.layout(*args, **kwargs)[3] == rows
 
 
 @pytest.mark.spec("LAY-3")
-def test_lay_3_tile_height_rounds_half_to_even():
-    grade, tile, cols, rows, sheets = seenby.layout(1032, 1033, 6)
+@pytest.mark.spec("LBL-3")
+def test_lay_3_lbl_3_tile_height_rounds_half_to_even():
+    grade, tile, cols, rows, sheets = seenby.layout(1032, 989, 6)
     assert (grade, tile) == ("window", 516)
-    assert tile * 1033 / 1032 == 516.5
+    assert tile * 989 / 1032 == 494.5
     assert rows == 3
 
 
@@ -1508,12 +1510,17 @@ def run_main(
     samples=None,
     display=None,
     version=FFMPEG_VERSION_LINE,
+    as_given=False,
 ):
+    """main() with the fakes in place. Unless `as_given`, an argv without `--selector` gets the selector its row
+    implies (CLI-28): `legacy` for a row that fakes only `thumbnails`, `events` for one that fakes `change_grids`."""
     monkeypatch.chdir(tmp_path)
     if video_exists:
         video = tmp_path / argv[0]
         video.parent.mkdir(parents=True, exist_ok=True)
         video.write_bytes(b"")
+    if not as_given and "--selector" not in argv:
+        argv = argv + ["--selector", "legacy" if samples is None else "events"]
     run = Run(monkeypatch, probe, thumbs, frames, sheets, tools, watch, samples, display, version)
     monkeypatch.setattr(sys, "argv", ["seenby.py"] + argv)
     run.rc = seenby.main()
@@ -1704,13 +1711,14 @@ def test_cli_17_23_man_12_wide_layout(monkeypatch, capsys, tmp_path):
 @pytest.mark.spec("MAN-3")
 @pytest.mark.spec("CLI-9")
 @pytest.mark.spec("MAN-12")
-def test_man_3_12_square_is_landscape_and_window(monkeypatch, capsys, tmp_path):
+@pytest.mark.spec("LBL-3")
+def test_man_3_12_lbl_3_square_is_landscape_and_window(monkeypatch, capsys, tmp_path):
     run = run_main(monkeypatch, capsys, tmp_path, ["video.mp4", "out"], static(30), probe=(15.0, 500, 500))
     assert run.rc == 0
     assert run.out.splitlines()[0] == "video.mp4: 15.0 s, 500x500, landscape"
-    assert run.out.splitlines()[3] == "  layout: window, tile 500 px, 3x3 per sheet"
+    assert run.out.splitlines()[3] == "  layout: window, tile 500 px, 3x2 per sheet"
     assert run.save_frames_calls[0][3] == 500
-    assert run.contact_sheets_calls[0][2:] == (3, 3)
+    assert run.contact_sheets_calls[0][2:] == (3, 2)
     data = manifest()
     assert data["video"]["orientation"] == "landscape"
     assert data["video"]["grade"] == "window"
@@ -1793,6 +1801,8 @@ def expect_argparse_error(monkeypatch, capsys, tmp_path, argv, text):
     monkeypatch.chdir(tmp_path)
     (tmp_path / argv[0]).write_bytes(b"")
     Run(monkeypatch, (15.0, 800, 600), static(4), None, None, None, None)
+    if "--selector" not in argv:
+        argv = argv + ["--selector", "legacy"]
     monkeypatch.setattr(sys, "argv", ["seenby.py"] + argv)
     with pytest.raises(SystemExit) as exc:
         seenby.main()
@@ -1964,6 +1974,7 @@ def test_cli_12_probe_value_error_is_reported_with_the_video_name(monkeypatch, c
         ("thumbnails", dict(thumbs=subprocess.CalledProcessError(1, ["ffmpeg"], stderr="x\nboom\n")), "ffmpeg failed during thumbnails (exit 1): boom"),
         ("frames", dict(frames=subprocess.CalledProcessError(69, ["ffmpeg"], stderr="bad frame")), "ffmpeg failed during frames (exit 69): bad frame"),
         ("sheets", dict(sheets=subprocess.CalledProcessError(3, ["ffmpeg"], stderr="no sheet")), "ffmpeg failed during sheets (exit 3): no sheet"),
+        ("sheets-ffprobe", dict(sheets=subprocess.CalledProcessError(1, ["ffprobe"], stderr="x\nno width\n")), "ffmpeg failed during sheets (exit 1): no width"),
     ],
 )
 def test_cli_12_failing_stage_is_reported_on_one_stderr_line(monkeypatch, capsys, tmp_path, stage, kwargs, expected):
@@ -4548,7 +4559,7 @@ def test_pck_4_needed_is_the_frames_every_window_would_take(samples, budget, nee
 EVENTS_ARGV = ["clip.mp4", "out", "--selector", "events"]
 EVENTS_PROBE = (2.0, 160, 80)
 EVENTS_HEADER = "clip.mp4: 2.0 s, 160x80, landscape"
-EVENTS_LAYOUT = "  layout: wide, tile 160 px, 2x18 per sheet"
+EVENTS_LAYOUT = "  layout: wide, tile 160 px, 2x14 per sheet"
 LEGACY_ONLY = "--threshold, --max-gap, --block-k and --sample-fps apply to the legacy selector only"
 EVENTS_ANALYSIS_KEYS = [
     "selector", "sample_fps", "samples", "cell", "pixel_threshold", "max_frames", "range", "segment", "changes",
@@ -4744,7 +4755,7 @@ def test_cli_27_one_sample_has_no_no_change_line(monkeypatch, capsys, tmp_path):
         EVENTS_HEADER,
         "  1 samples at 4 per second, 0 changes, 0 pointer moves, selected 1/24",
         "  frames: 0.00 first",
-        "  layout: wide, tile 160 px, 1x18 per sheet",
+        "  layout: wide, tile 160 px, 1x14 per sheet",
     ]
 
 
@@ -4880,7 +4891,7 @@ def test_cli_26_rotated_stream_uses_the_display_size_everywhere(monkeypatch, cap
 def test_cli_26_a_frame_under_one_cell_is_refused(monkeypatch, capsys, tmp_path, probe, display, size):
     run = run_events(monkeypatch, capsys, tmp_path, [], events_two(), probe=probe, display=display)
     assert run.rc == 1
-    assert f"clip.mp4: the frame ({size}) is smaller than 8x8 px; use the legacy selector" in run.err.splitlines()
+    assert f"clip.mp4: the frame ({size}) is smaller than 8x8 px; use --selector legacy" in run.err.splitlines()
     assert run.change_grids_calls == []
 
 
@@ -5451,3 +5462,448 @@ def test_ff_11_passthrough_option_by_ffmpeg_version(version, option):
 def test_pck_4_samples_may_be_memoryviews(samples, frames):
     views = [(memoryview(mean), memoryview(change)) for mean, change in samples]
     assert seenby.select_events(views, GW, GH, 24)["frames"] == frames
+
+
+# -------- CLI-28 (step 13): the events selector by default
+
+SELECTOR_HELP = (
+    "events: changed pixels at native resolution, one frame per screen state that changed (the default); "
+    "legacy: 32x32 thumbnails against a threshold, a timer and a cap, deprecated and to be removed; "
+    "--threshold, --max-gap, --block-k or --sample-fps without --selector choose legacy"
+)
+EVENTS_TWO_DRY_RUN_STDOUT = (
+    EVENTS_HEADER + "\n"
+    + "  7 samples at 4 per second, 3 changes, 0 pointer moves, selected 3/24\n"
+    + "  frames: 0.00 first, 1.00 change, 1.50 last\n"
+    + EVENTS_LAYOUT + "\n"
+)
+
+
+def run_without_and_with(monkeypatch, capsys, tmp_path, argv, selector, thumbs, probe):
+    """main() on `argv` as given and on `argv` with `--selector <selector>`, each in its own folder, both with
+    `thumbnails` and `change_grids` faked (samples `two`); each Run carries its `frames.json` as `manifest`."""
+    runs = []
+    for name, extra in [("without", []), ("with", ["--selector", selector])]:
+        where = tmp_path / name
+        where.mkdir()
+        run = run_main(
+            monkeypatch, capsys, where, argv + extra, thumbs, probe=probe, samples=events_two(), as_given=True
+        )
+        run.manifest = manifest() if os.path.exists(os.path.join("out", "frames.json")) else None
+        runs.append(run)
+    return runs
+
+
+def observed(run):
+    return (
+        run.rc, run.out, run.err, run.thumbnails_calls, run.change_grids_calls, run.save_frames_calls,
+        run.save_samples_calls, run.contact_sheets_calls, run.manifest,
+    )
+
+
+@pytest.mark.spec("CLI-28")
+def test_cli_28_without_selector_the_events_selector_runs(monkeypatch, capsys, tmp_path):
+    without, with_events = run_without_and_with(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], "events", static(4), EVENTS_PROBE
+    )
+    assert without.rc == 0
+    assert without.change_grids_calls == [("clip.mp4", 160, 80, 4, 0.0, None)]
+    assert without.thumbnails_calls == []
+    assert without.out == (
+        EVENTS_TWO_DRY_RUN_STDOUT
+        + "  contact sheets: out/sheet-01.jpg\n"
+        + MANIFEST_LINE.format(out_dir="out") + "\n"
+    )
+    assert without.manifest["analysis"]["selector"] == "events"
+    assert observed(without) == observed(with_events)
+
+
+@pytest.mark.spec("CLI-28")
+def test_cli_28_dry_run_without_selector_prints_the_events_lines(monkeypatch, capsys, tmp_path):
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--dry-run"], static(4),
+        probe=EVENTS_PROBE, samples=events_two(), as_given=True,
+    )
+    assert run.rc == 0
+    assert run.out == EVENTS_TWO_DRY_RUN_STDOUT
+    assert run.thumbnails_calls == []
+    assert run.change_grids_calls == [("clip.mp4", 160, 80, 4, 0.0, None)]
+    assert run.save_samples_calls == []
+    assert run.save_frames_calls == []
+    assert run.contact_sheets_calls == []
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.spec("CLI-28")
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--threshold", "5"],
+        ["--max-gap", "2"],
+        ["--block-k", "0"],
+        ["--sample-fps", "4"],
+        ["--threshold", "12"],
+    ],
+    ids=["threshold", "max-gap", "block-k", "sample-fps", "threshold-at-its-default"],
+)
+def test_cli_28_a_legacy_only_option_without_selector_chooses_legacy(monkeypatch, capsys, tmp_path, extra):
+    without, with_legacy = run_without_and_with(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out"] + extra, "legacy", static(30), (15.0, 800, 600)
+    )
+    assert without.rc == 0
+    assert len(without.thumbnails_calls) == 1
+    assert without.change_grids_calls == []
+    assert without.save_samples_calls == []
+    assert without.out.splitlines()[1].startswith("  30 thumbnails, selected ")
+    assert observed(without) == observed(with_legacy)
+
+
+@pytest.mark.spec("CLI-28")
+def test_cli_28_explicit_legacy_gives_the_static_legacy_result(monkeypatch, capsys, tmp_path):
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--selector", "legacy"], static(30), samples=events_two()
+    )
+    assert run.rc == 0
+    assert run.change_grids_calls == []
+    assert run.thumbnails_calls == [("clip.mp4", 2.0, 0.0, None)]
+    assert run.out == STATIC_30_STDOUT
+    assert manifest() == static_30_manifest()
+
+
+@pytest.mark.spec("CLI-28")
+@pytest.mark.spec("CLI-26")
+def test_cli_28_explicit_events_with_a_legacy_only_option_stays_a_usage_error(monkeypatch, capsys, tmp_path):
+    run = run_events_exit(monkeypatch, capsys, tmp_path, EVENTS_ARGV + ["--threshold", "5"], events_two())
+    assert run.code == 2
+    assert LEGACY_ONLY in run.err
+    assert run.change_grids_calls == []
+
+
+@pytest.mark.spec("CLI-28")
+@pytest.mark.spec("CLI-26")
+def test_cli_28_a_frame_under_one_cell_without_selector_points_to_selector_legacy(monkeypatch, capsys, tmp_path):
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(4), probe=(2.0, 6, 6), samples=events_two(),
+        as_given=True,
+    )
+    assert run.rc == 1
+    assert "clip.mp4: the frame (6x6) is smaller than 8x8 px; use --selector legacy" in run.err.splitlines()
+    assert run.change_grids_calls == []
+    assert run.thumbnails_calls == []
+
+
+@pytest.mark.spec("CLI-28")
+def test_cli_28_help_names_events_the_default_and_legacy_deprecated(monkeypatch, capsys):
+    monkeypatch.setenv("COLUMNS", "1000")
+    monkeypatch.setattr(sys, "argv", ["seenby.py", "--help"])
+    with pytest.raises(SystemExit) as exc:
+        seenby.main()
+    assert exc.value.code == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert SELECTOR_HELP in out
+    assert "cap on kept frames (default: 24)" in out
+
+
+def help_entries(monkeypatch, capsys):
+    """`--help` at 1000 columns as (help text per option string, whitespace collapsed; option strings in printed
+    order). An entry starts on a line indented two spaces with a dash, its help follows two spaces on that line or
+    on the lines indented deeper."""
+    monkeypatch.setenv("COLUMNS", "1000")
+    monkeypatch.setattr(sys, "argv", ["seenby.py", "--help"])
+    with pytest.raises(SystemExit) as exc:
+        seenby.main()
+    assert exc.value.code == 0
+    helps, order, parts = {}, [], None
+    for line in capsys.readouterr().out.splitlines():
+        if line.startswith("  -"):
+            invocation, _, first = line.strip().partition("  ")
+            parts = [first]
+            for name in [each.split()[0] for each in invocation.split(", ")]:
+                helps[name] = parts
+                order.append(name)
+        elif parts is not None and line.startswith("   "):
+            parts.append(line)
+        else:
+            parts = None
+    return {name: " ".join(" ".join(p).split()) for name, p in helps.items()}, order
+
+
+@pytest.mark.spec("CLI-28")
+@pytest.mark.parametrize(
+    "option, needles",
+    [
+        ("--threshold", ["default: 12.0"]),
+        ("--max-gap", ["seconds", "default: 3.0"]),
+        ("--block-k", ["default: 5.0", "0 disables"]),
+        ("--sample-fps", ["default: 2.0"]),
+    ],
+    ids=["threshold", "max-gap", "block-k", "sample-fps"],
+)
+def test_cli_28_help_of_a_legacy_only_option_starts_legacy_selector_only_after_selector(
+    monkeypatch, capsys, option, needles
+):
+    helps, order = help_entries(monkeypatch, capsys)
+    assert option in helps and "--selector" in helps
+    assert helps[option].startswith("legacy selector only: ")
+    for needle in needles:
+        assert needle in helps[option]
+    assert order.index("--selector") < order.index(option)
+
+
+@pytest.mark.spec("CLI-28")
+def test_cli_28_sample_fps_help_is_the_rule_text(monkeypatch, capsys):
+    helps, _ = help_entries(monkeypatch, capsys)
+    assert helps.get("--sample-fps") == "legacy selector only: thumbnails per second analysed (default: 2.0)"
+
+
+# ---------------------------------------------------------------- Step 14: frame number and time above every tile
+
+BAND_H = 22
+
+GLYPHS = {
+    "0": "01110 10001 10011 10101 11001 10001 01110",
+    "1": "00100 01100 00100 00100 00100 00100 01110",
+    "2": "01110 10001 00001 00010 00100 01000 11111",
+    "3": "11111 00010 00100 00010 00001 10001 01110",
+    "4": "00010 00110 01010 10010 11111 00010 00010",
+    "5": "11111 10000 11110 00001 00001 10001 01110",
+    "6": "00110 01000 10000 11110 10001 10001 01110",
+    "7": "11111 00001 00010 00100 01000 01000 01000",
+    "8": "01110 10001 10001 01110 10001 10001 01110",
+    "9": "01110 10001 10001 01111 00001 00010 01100",
+    "#": "01010 01010 11111 01010 11111 01010 01010",
+    ".": "00000 00000 00000 00000 00000 01100 01100",
+    "s": "00000 00000 01110 10000 01110 00001 11110",
+    " ": "00000 00000 00000 00000 00000 00000 00000",
+}
+GLYPH_IDS = [{"#": "hash", ".": "dot", " ": "space"}.get(char, char) for char in GLYPHS]
+
+
+def band_header(width):
+    return b"P5\n%d 22\n255\n" % width
+
+
+def reference_band(text, width):
+    """LBL-1 from the glyph table: each 1 of the i-th character's glyph (row r, column c) is the 2x2 bytes at
+    x 4 + 12 * i + 2 * c, y 4 + 2 * r set to 0, bytes at x >= width left out; a character without a glyph draws nothing.
+    Row 21 is all 0."""
+    pixels = bytearray([255]) * ((BAND_H - 1) * width) + bytearray(width)
+    for i, char in enumerate(text):
+        for r, bits in enumerate(GLYPHS.get(char, "").split()):
+            for c, bit in enumerate(bits):
+                if bit != "1":
+                    continue
+                for y in (4 + 2 * r, 5 + 2 * r):
+                    for x in (4 + 12 * i + 2 * c, 5 + 12 * i + 2 * c):
+                        if x < width:
+                            pixels[y * width + x] = 0
+    return band_header(width) + bytes(pixels)
+
+
+def band_pixels(band, width):
+    header = band_header(width)
+    assert band[: len(header)] == header
+    return band[len(header):]
+
+
+# -------- LBL-1 (label_band)
+
+
+@pytest.mark.spec("LBL-1")
+@pytest.mark.spec("LBL-3")
+def test_lbl_1_3_band_is_22_px_high():
+    assert seenby.LABEL_H == 22
+
+
+@pytest.mark.spec("LBL-1")
+def test_lbl_1_hash_1_at_width_30():
+    band = seenby.label_band("#1", 30)
+    assert isinstance(band, bytes)
+    assert len(band) == 673
+    assert band[:13] == b"P5\n30 22\n255\n"
+    pixels = band[13:]
+    assert len(pixels) == 660
+    assert pixels.count(0) == 150
+    assert pixels.count(255) == 510
+    assert pixels[21 * 30:] == bytes(30)
+    assert pixels[4 * 30 + 6] == 0
+    assert pixels[4 * 30 + 4] == 255
+    assert pixels[4 * 30 + 20] == 0
+    assert band == reference_band("#1", 30)
+
+
+@pytest.mark.spec("LBL-1")
+def test_lbl_1_bytes_at_or_past_the_width_are_not_drawn():
+    band = seenby.label_band("88", 10)
+    assert band[:13] == b"P5\n10 22\n255\n"
+    pixels = band[13:]
+    assert len(pixels) == 220
+    assert pixels[:210].count(0) == 40
+    assert pixels[:210].count(255) == 170
+    assert {i % 10 for i, value in enumerate(pixels[:210]) if value == 0} == set(range(4, 10))
+    assert pixels[210:] == bytes(10)
+    assert band == reference_band("88", 10)
+
+
+@pytest.mark.spec("LBL-1")
+@pytest.mark.parametrize("text, width, count", [("", 8, 168), ("?!", 40, 840)], ids=["empty", "no-glyphs"])
+def test_lbl_1_text_without_glyphs_draws_nothing(text, width, count):
+    pixels = band_pixels(seenby.label_band(text, width), width)
+    assert len(pixels) == 22 * width
+    assert pixels[:count] == bytes([255]) * count
+    assert pixels[count:] == bytes(width)
+
+
+@pytest.mark.spec("LBL-1")
+def test_lbl_1_a_frame_label_stays_within_its_ten_characters_and_rows_4_to_17():
+    band = seenby.label_band("#07 12.25s", 256)
+    pixels = band_pixels(band, 256)
+    assert len(pixels) == 22 * 256
+    rows = [pixels[y * 256:(y + 1) * 256] for y in range(22)]
+    assert all(0 not in row[124:] for row in rows[:21])
+    assert all(0 not in rows[y] for y in [0, 1, 2, 3, 18, 19, 20])
+    assert rows[21] == bytes(256)
+    assert pixels.count(0) == 4 * sum(GLYPHS[char].count("1") for char in "#07 12.25s") + 256
+    assert band == reference_band("#07 12.25s", 256)
+
+
+@pytest.mark.spec("LBL-1")
+@pytest.mark.parametrize("char", list(GLYPHS), ids=GLYPH_IDS)
+def test_lbl_1_every_glyph_of_the_table(char):
+    assert seenby.label_band(char, 16) == reference_band(char, 16)
+
+
+@pytest.mark.spec("LBL-1")
+@pytest.mark.parametrize(
+    "text, width",
+    [
+        ("#01 0.00s", 160),
+        ("#24 31.50s", 776),
+        ("#07 12.25s", 124),
+        ("0123456789#. s", 200),
+        ("0123456789#. s", 101),
+        ("?#", 30),
+        ("S5", 30),
+        ("#1", 5),
+    ],
+    ids=[
+        "first-frame", "last-frame-at-776", "ends-at-the-width", "whole-table", "cut-inside-a-glyph-column",
+        "no-glyph-keeps-its-12-px", "upper-case-has-no-glyph", "one-byte-column",
+    ],
+)
+def test_lbl_1_more_labels_match_the_glyph_table(text, width):
+    assert seenby.label_band(text, width) == reference_band(text, width)
+
+
+# -------- LBL-2 (contact_sheets with the bands; amends FF-4)
+
+
+@pytest.mark.spec("LBL-2")
+def test_lbl_2_no_frames_give_no_sheets(tmp_path):
+    assert seenby.contact_sheets([], str(tmp_path), 3, 2) == []
+
+
+@pytest.mark.spec("LBL-2")
+@pytest.mark.spec("CLI-12")
+@pytest.mark.parametrize(
+    "argv, kwargs",
+    [
+        (["clip.mp4", "out"], dict(thumbs=static(30))),
+        (EVENTS_ARGV, dict(thumbs=static(4), probe=EVENTS_PROBE, samples=events_two())),
+    ],
+    ids=["legacy", "events"],
+)
+def test_lbl_2_contact_sheets_value_error_is_reported_with_the_video_name(monkeypatch, capsys, tmp_path, argv, kwargs):
+    error = ValueError("ffprobe could not read the frame width of out/frame-01.jpg")
+    run = run_main(monkeypatch, capsys, tmp_path, argv, sheets=error, **kwargs)
+    assert run.rc == 1
+    assert len(run.contact_sheets_calls) == 1
+    assert run.err.splitlines() == ["clip.mp4: ffprobe could not read the frame width of out/frame-01.jpg"]
+    assert not (tmp_path / "out" / "frames.json").exists()
+
+
+# -------- LBL-3 (layout rows with the band; amends LAY-3)
+
+
+@pytest.mark.spec("LBL-3")
+@pytest.mark.parametrize(
+    "args, kwargs, expected",
+    [
+        ((2120, 422, 24), {}, ("wide", 776, 2, 8, 2)),
+        ((814, 872, 24), {}, ("window", 516, 3, 2, 4)),
+        ((800, 600, 30), {"rows": 5}, ("window", 516, 3, 5, 2)),
+        ((526, 514, 3), {}, ("window", 516, 3, 2, 1)),
+        ((2560, 1228, 8), {}, ("wide", 776, 2, 3, 2)),
+        ((500, 500, 6), {}, ("window", 500, 3, 2, 1)),
+        ((1032, 1033, 6), {}, ("window", 516, 3, 2, 1)),
+    ],
+    ids=[
+        "wide-9-to-8-rows", "window-unchanged", "rows-given-as-is", "lay-row-526x514", "lay-row-2560x1228",
+        "lay-row-500x500", "1032x1033-3-to-2-rows",
+    ],
+)
+def test_lbl_3_rows_leave_room_for_the_band(args, kwargs, expected):
+    assert seenby.layout(*args, **kwargs) == expected
+
+
+@pytest.mark.spec("LBL-3")
+@pytest.mark.spec("LAY-P1")
+@settings(deadline=None)
+@given(
+    width=st.integers(min_value=16, max_value=4000),
+    height=st.integers(min_value=16, max_value=4000),
+    n_frames=st.integers(min_value=1, max_value=60),
+    sheet_width=st.integers(min_value=64, max_value=4000),
+    rows=st.none() | st.integers(min_value=1, max_value=8),
+    tile_width=st.none() | st.integers(min_value=16, max_value=2000),
+)
+def test_lbl_3_rows_are_the_most_whose_sheet_with_bands_fits(width, height, n_frames, sheet_width, rows, tile_width):
+    grade, tile, cols, got_rows, sheets = seenby.layout(width, height, n_frames, sheet_width, rows, tile_width)
+    if rows is not None:
+        assert got_rows == rows
+        return
+    tile_h = round(tile * height / width)
+    step = tile_h + BAND_H + seenby.PADDING
+    assert got_rows == max(1, (sheet_width - 2 * seenby.MARGIN + seenby.PADDING) // step)
+    assert got_rows == 1 or got_rows * step - seenby.PADDING + 2 * seenby.MARGIN <= sheet_width
+
+
+@pytest.mark.spec("LBL-3")
+@pytest.mark.spec("MAN-12")
+def test_lbl_3_events_run_at_160x80_has_14_rows_per_sheet(monkeypatch, capsys, tmp_path):
+    run = run_events(monkeypatch, capsys, tmp_path, [], events_two())
+    assert run.rc == 0
+    assert run.out.splitlines()[3] == "  layout: wide, tile 160 px, 2x14 per sheet"
+    assert run.contact_sheets_calls[0][1:] == ("out", 2, 14)
+    assert manifest()["sheet"] == {"cols": 2, "rows": 14, "tile_width": 160, "sheet_width": 1568, "count": 1}
+
+
+@pytest.mark.spec("LBL-3")
+@pytest.mark.spec("MAN-12")
+def test_lbl_3_portrait_80x160_has_8_rows_per_sheet(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(30), probe=(15.0, 80, 160))
+    assert run.rc == 0
+    assert run.out.splitlines()[3] == "  layout: phone, tile 80 px, 6x8 per sheet"
+    assert run.save_frames_calls[0][3] == 80
+    assert run.contact_sheets_calls[0][1:] == ("out", 6, 8)
+    assert manifest()["sheet"] == {"cols": 6, "rows": 8, "tile_width": 80, "sheet_width": 1568, "count": 1}
+
+
+@pytest.mark.spec("LBL-3")
+@pytest.mark.spec("MAN-7")
+@pytest.mark.spec("MAN-12")
+def test_lbl_3_man_7_12_square_frames_spread_over_sheets_of_six(monkeypatch, capsys, tmp_path):
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(61), probe=(30.0, 500, 500),
+        sheets=["out/sheet-01.jpg", "out/sheet-02.jpg"],
+    )
+    assert run.rc == 0
+    assert run.contact_sheets_calls[0][2:] == (3, 2)
+    data = manifest()
+    assert [f["time"] for f in data["frames"]] == [float(t) for t in range(0, 31, 3)]
+    assert [f["sheet"] for f in data["frames"]] == [1] * 6 + [2] * 5
+    assert data["sheets"] == [
+        {"file": "sheet-01.jpg", "frames": [1, 6]},
+        {"file": "sheet-02.jpg", "frames": [7, 11]},
+    ]
+    assert data["sheet"] == {"cols": 3, "rows": 2, "tile_width": 500, "sheet_width": 1568, "count": 2}

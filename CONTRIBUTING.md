@@ -9,8 +9,7 @@ Open an issue with the bug report template. The useful parts are the exact comma
 the `frames.json` from the run, and the recording's resolution and duration. If you can share the recording
 itself, do; if not, `--dry-run` output plus `frames.json` is usually enough to see what the selection did.
 
-"It picked the wrong frames" is a real bug class here. Say which moment you expected on a sheet and was not
-there; the `reason` and `diff` values in `frames.json` show why it was skipped.
+"It picked the wrong frames" is a real bug class here. Say which moment you expected on a sheet and was not there. `events` in `frames.json` lists every change seenby found, with `shown: false` for the ones no frame shows, and the console names the stretch to rerun; with `--selector legacy` the `reason` and `diff` values of the frames show why a moment was skipped.
 
 ## How behaviour is defined
 

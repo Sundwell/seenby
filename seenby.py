@@ -6,13 +6,13 @@ the **previous** one. Someone recording a phone screen scrolls smoothly, so
 neighbouring frames are nearly identical and no threshold ever fires. Measured
 on four real customer recordings: scene detection returned **zero** frames.
 
-This script compares each frame with the **last frame it kept**. The change
-accumulates, and a couple of seconds of scrolling crosses the threshold. Two
-safety nets on top: a frame is forced when more than `--max-gap` seconds have
-passed since the last kept one, and there is a cap on the number of frames.
-The cap **raises the threshold** instead of cutting the tail: in a screen
-recording the end usually matters more than the start, that is where the
-result is shown.
+The default selector counts changed pixels where they happen: ffmpeg compares
+every pixel's luma with the previous sample, four per second, in 8x8 px cells.
+Changes of one screen area make one event, on screen from when it settles until
+that area changes again, and the kept frames are the fewest that show every
+event, plus the first and the last, up to a cap. The legacy selector
+(`--selector legacy`, deprecated) compares 32x32 thumbnails with the last kept
+frame against a threshold, with a timer and a cap that raises the threshold.
 
 Output: individual frames, contact sheets (each sheet a single image an agent
 can read in one go) and `frames.json`, the manifest with the time and reason
@@ -72,7 +72,17 @@ HOLD_DELTA = 6       # cell-mean levels that still count as the same look
 HOLD_SHARE = 0.25    # share of an event's cells that may differ before its state counts as gone
 BLINK_REPEATS = 4    # a one-cell-wide spot flipping between two looks this often, briefly, is a blinking caret
 CARET_H = 64         # px, the tallest box such a spot may have
+LABEL_H = 22         # px, the band above each tile of a sheet with the frame's number and time
 _SAMPLES = 'fps=%g:round=up:start_time=0'
+_GLYPHS = {
+    '0': '01110 10001 10011 10101 11001 10001 01110', '1': '00100 01100 00100 00100 00100 00100 01110',
+    '2': '01110 10001 00001 00010 00100 01000 11111', '3': '11111 00010 00100 00010 00001 10001 01110',
+    '4': '00010 00110 01010 10010 11111 00010 00010', '5': '11111 10000 11110 00001 00001 10001 01110',
+    '6': '00110 01000 10000 11110 10001 10001 01110', '7': '11111 00001 00010 00100 01000 01000 01000',
+    '8': '01110 10001 10001 01110 10001 10001 01110', '9': '01110 10001 10001 01111 00001 00010 01100',
+    '#': '01010 01010 11111 01010 11111 01010 01010', '.': '00000 00000 00000 00000 00000 01100 01100',
+    's': '00000 00000 01110 10000 01110 00001 11110',
+}
 _ACTIVE = bytes(1 if v >= MIN_CELL else 0 for v in range(256))
 
 
@@ -713,7 +723,7 @@ def layout(width, height, n_frames, sheet_width=SHEET_WIDTH, rows=None, tile_wid
     tile = min(tile, width)
     tile_h = round(tile * height / width)
     if rows is None:
-        rows = max(1, (sheet_width - 2 * MARGIN + PADDING) // (tile_h + PADDING))
+        rows = max(1, (sheet_width - 2 * MARGIN + PADDING) // (tile_h + LABEL_H + PADDING))
     cols = min(cols, n_frames)
     return grade, tile, cols, rows, math.ceil(n_frames / (cols * rows))
 
@@ -785,14 +795,36 @@ def save_samples(path, indices, times, out_dir, tile_width, fps=EVENT_FPS, start
     return paths
 
 
+def label_band(text, width):
+    """A white band LABEL_H px high and `width` wide with `text` in a 5x7 font at double size, as PGM bytes."""
+    band = [bytearray(b'\xff') * width for _ in range(LABEL_H - 1)] + [bytearray(width)]
+    for i, ch in enumerate(text):
+        for r, bits in enumerate(_GLYPHS.get(ch, '').split()):
+            for c, bit in enumerate(bits):
+                if bit == '1':
+                    for y in (4 + 2 * r, 5 + 2 * r):
+                        for x in (4 + 12 * i + 2 * c, 5 + 12 * i + 2 * c):
+                            if x < width:
+                                band[y][x] = 0
+    return b'P5\n%d %d\n255\n' % (width, LABEL_H) + b''.join(band)
+
+
 def contact_sheets(paths, out_dir, cols, rows):
-    """Tile frames into `cols x rows` images: an agent reads each in one go.
+    """Tile frames into `cols x rows` images, each frame under a band with its number and time.
 
     Several sheets rather than one big one: vision models downscale an image
     to roughly 1568 px on the long side. One landscape sheet of 24 frames in
     two columns would be 1580 x 5300 px, and after downscaling a 780 px tile
     turns into 230 px, unreadable. Three landscape rows fit without shrinking.
     """
+    if not paths:
+        return []
+    probed = subprocess.run([ffprobe(), '-v', 'error', '-select_streams', 'v:0', '-show_entries',
+                             'stream=width,pix_fmt', '-of', 'csv=p=0', paths[0]],
+                            capture_output=True, text=True, check=True).stdout.strip().split(',')
+    if len(probed) != 2 or not probed[0].isdigit():
+        raise ValueError('ffprobe could not read the frame width of %s' % paths[0])
+    width, fmt = int(probed[0]), probed[1]
     per_sheet = cols * rows
     sheets = []
     for n, start in enumerate(range(0, len(paths), per_sheet), 1):
@@ -800,16 +832,24 @@ def contact_sheets(paths, out_dir, cols, rows):
         sheet = os.path.join(out_dir, 'sheet-%02d.jpg' % n)
         # The `tile` filter needs a single input stream; separate `-i` inputs
         # silently collapse into one frame, so the batch goes in as a concat list.
-        with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
-            f.write(''.join("file '%s'\n" % os.path.abspath(p) for p in batch))
-        try:
+        with tempfile.TemporaryDirectory() as tmp:
+            frames, bands = os.path.join(tmp, 'frames.txt'), os.path.join(tmp, 'bands.txt')
+            with open(frames, 'w') as f, open(bands, 'w') as b:
+                for i, path in enumerate(batch):
+                    name = os.path.basename(path)[len('frame-'):-len('.jpg')]
+                    band = os.path.join(tmp, 'band-%02d.pgm' % i)
+                    with open(band, 'wb') as g:
+                        g.write(label_band('#' + name.replace('-', ' ', 1), width))
+                    f.write("file '%s'\n" % os.path.abspath(path).replace("'", "'\\''"))
+                    b.write("file '%s'\n" % band.replace("'", "'\\''"))
             here = min(cols, len(batch))
-            subprocess.run([ffmpeg(), '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', f.name,
-                            '-vf', 'tile=%dx%d:margin=%d:padding=%d' % (
-                                here, math.ceil(len(batch) / here), MARGIN, PADDING),
+            # concat gives the band images broken timestamps and vstack pairs by timestamp, so both are renumbered
+            graph = ('[0:v]setpts=N,format=%s[f];[1:v]setpts=N,format=%s[b];[b][f]vstack=shortest=1,'
+                     'tile=%dx%d:margin=%d:padding=%d'
+                     % (fmt, fmt, here, math.ceil(len(batch) / here), MARGIN, PADDING))
+            subprocess.run([ffmpeg(), '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', frames,
+                            '-f', 'concat', '-safe', '0', '-i', bands, '-filter_complex', graph,
                             '-frames:v', '1', sheet], check=True)
-        finally:
-            os.remove(f.name)
         sheets.append(sheet)
     return sheets
 
@@ -824,7 +864,7 @@ def _run_events(args, out_dir, start, end, ranged, duration, width, height):
     try:
         width, height = display_size(args.video, width, height)
         if width < CELL or height < CELL:
-            return fail('%s: the frame (%dx%d) is smaller than %dx%d px; use the legacy selector'
+            return fail('%s: the frame (%dx%d) is smaller than %dx%d px; use --selector legacy'
                         % (args.video, width, height, CELL, CELL))
         length = end - start if ranged else None
         span = [] if length is None else ['-t', '%.3f' % length]
@@ -945,41 +985,47 @@ def main():
     p.add_argument('video', help='screen recording in any format ffmpeg reads')
     p.add_argument('out_dir', nargs='?', default=None,
                    help='output directory (default: the video path without extension plus -frames)')
-    p.add_argument('--threshold', type=float, default=None,
-                   help='mean grey-level difference (0-255) against the last kept frame that keeps a frame '
-                        '(default: %.1f)' % THRESHOLD)
-    p.add_argument('--max-gap', type=float, default=None,
-                   help='seconds without a kept frame after which one is forced (default: %.1f)' % MAX_GAP)
     p.add_argument('--max-frames', type=int, default=MAX_FRAMES,
-                   help='cap on kept frames; raises the threshold, never cuts the tail (default: %d)' % MAX_FRAMES)
-    p.add_argument('--block-k', type=float, default=None,
-                   help='keep a frame when any %dx%d block of the thumbnail differs by more than this times the '
-                        'threshold, even if the mean does not; 0 disables (default: %.1f)' % (BLOCK, BLOCK, BLOCK_K))
+                   help='cap on kept frames (default: %d)' % MAX_FRAMES)
     p.add_argument('--sheet-width', type=int, default=SHEET_WIDTH,
                    help='contact sheet long side, px (default: %d)' % SHEET_WIDTH)
     p.add_argument('--rows', type=int, default=None,
                    help='rows per contact sheet (default: as many as fit the sheet width)')
     p.add_argument('--tile-width', type=int, default=None,
                    help='tile width, px (default: 256, 516 or 776 by aspect ratio)')
-    p.add_argument('--sample-fps', type=float, default=None,
-                   help='thumbnails per second analysed (default: %.1f)' % SAMPLE_FPS)
     p.add_argument('--from', dest='start', type=float, default=None,
                    help='analyse from this second (default: 0)')
     p.add_argument('--to', dest='end', type=float, default=None,
                    help='analyse up to this second (default: the end of the video)')
     p.add_argument('--segment', type=float, default=120.0,
                    help='length of the index stretches in frames.json, seconds (default: 120)')
-    p.add_argument('--selector', choices=('legacy', 'events'), default='legacy',
-                   help='legacy: 32x32 thumbnails against a threshold, a timer and a cap; events: changed pixels at '
-                        'native resolution, one frame per screen state that changed (default: legacy)')
+    p.add_argument('--selector', choices=('legacy', 'events'), default=None,
+                   help='events: changed pixels at native resolution, one frame per screen state that changed (the '
+                        'default); legacy: 32x32 thumbnails against a threshold, a timer and a cap, deprecated and to '
+                        'be removed; --threshold, --max-gap, --block-k or --sample-fps without --selector choose '
+                        'legacy')
+    p.add_argument('--threshold', type=float, default=None,
+                   help='legacy selector only: mean grey-level difference (0-255) against the last kept frame '
+                        'that keeps a frame (default: %.1f)' % THRESHOLD)
+    p.add_argument('--max-gap', type=float, default=None,
+                   help='legacy selector only: seconds without a kept frame after which one is forced '
+                        '(default: %.1f)' % MAX_GAP)
+    p.add_argument('--block-k', type=float, default=None,
+                   help='legacy selector only: keep a frame when any %dx%d block of the thumbnail differs by more '
+                        'than this times the threshold, even if the mean does not; 0 disables (default: %.1f)'
+                        % (BLOCK, BLOCK, BLOCK_K))
+    p.add_argument('--sample-fps', type=float, default=None,
+                   help='legacy selector only: thumbnails per second analysed (default: %.1f)' % SAMPLE_FPS)
     p.add_argument('--dry-run', action='store_true',
                    help='print the selected times and the layout, extract nothing')
     p.add_argument('--force', action='store_true',
                    help='overwrite an output directory that holds frame-*.jpg from something else')
     args = p.parse_args()
-    if args.selector == 'events' and any(v is not None for v in (args.threshold, args.max_gap, args.block_k,
-                                                                  args.sample_fps)):
+    legacy_only = any(v is not None for v in (args.threshold, args.max_gap, args.block_k, args.sample_fps))
+    if args.selector == 'events' and legacy_only:
         p.error('--threshold, --max-gap, --block-k and --sample-fps apply to the legacy selector only')
+    if args.selector is None:
+        args.selector = 'legacy' if legacy_only else 'events'
     args.threshold = THRESHOLD if args.threshold is None else args.threshold
     args.max_gap = MAX_GAP if args.max_gap is None else args.max_gap
     args.block_k = BLOCK_K if args.block_k is None else args.block_k

@@ -17,7 +17,7 @@ whole speech with timecodes, and the reading rule. The core stays dependency-fre
 - A speech segment is a dict `{"start": <float s>, "end": <float s>, "text": <str>, "avg_logprob": <float>}`.
   `start < end`. Lists of segments are ascending by `start`.
 - A frame entry is an item of `frames.json`'s `frames` list (keys `n`, `time`, `file`, `sheet`, `reason`,
-  `diff`, `block`, `recheck`), and the manifest is the whole `frames.json` dict as `seenby.py` writes it.
+  `diff`, `block`, `recheck` from the legacy selector; the events selector, the default since seenby step 13, writes no `diff` and `block`, see RPT-18), and the manifest is the whole `frames.json` dict as `seenby.py` writes it.
 - "The core" is `seenby.py` in the same directory as `seenby_report.py`.
 - Decibel values are floats; `-91.0` is ffmpeg's floor for silence.
 
