@@ -1,6 +1,13 @@
 BLINK_REPEATS = 4
 BLOCK = 8
 BLOCK_K = 5.0
+BOX_GAP = 2
+BOX_MAX = 12
+BOX_NEAR = 6
+BOX_SHARE = 0.5
+BOX_SPREAD = 64
+BOX_STRONG = 4
+BOX_T = 3
 CARET_H = 64
 CELL = 8
 EPISODE_S = 5.0
@@ -36,14 +43,16 @@ def blobs(change, gw, gh, cell=8)
     """Changed areas of one sample in native pixels, or one blob for the whole frame when most of it changed."""
 def block_max(a, b, bs=8)
     """Largest mean difference over the bs x bs blocks of two thumbnails."""
+def change_boxes(regions, native_width, width, height)
+    """Boxes to draw around `regions` on a tile: scaled, padded, joined when close, dropped when they cover the tile."""
 def change_grids(path, width, height, fps=4, start=0.0, length=None)
     """Cell grids of a recording: per sample the cell means and the share of pixels changed since the previous one."""
 def check_out_dir(out_dir, force)
     """None when the directory is ours to clean, otherwise the refusal to print."""
 def clean(out_dir)
     """Remove our own files from a previous run, leave everything else alone."""
-def contact_sheets(paths, out_dir, cols, rows)
-    """Tile frames into `cols x rows` images, each frame under a band with its number and time."""
+def contact_sheets(paths, out_dir, cols, rows, boxes=None)
+    """Tile frames into `cols x rows` images, each frame under a band with its number and time, its `boxes` drawn on it."""
 def display_size(path, width, height)
     """(width, height) as shown: swapped when the stream carries a rotation of 90 or 270 degrees."""
 def events_of(content, joined=True)
@@ -55,6 +64,8 @@ def fill(points, long_pairs, budget, fps=4)
     """Spend what the budget has left inside long continuous changes."""
 def fit_to_cap(thumbs, max_frames, threshold, max_gap, block_k=5.0, sample_fps=2)
     """Raise the threshold until the frames fit the cap. Never cut the tail."""
+def kept_changes(path, indices, width, height, fps=4, start=0.0, length=None)
+    """Per kept sample, the cells' shares of pixels changed past PIXEL_T and past twice that since the one before."""
 def label_band(text, width)
     """A white band LABEL_H px high and `width` wide with `text` in a 5x7 font at double size, as PGM bytes."""
 def layout(width, height, n_frames, sheet_width=1568, rows=None, tile_width=None)

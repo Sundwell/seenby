@@ -50,11 +50,13 @@ recording-frames/
   frame-01-0.00s.jpg     one file per kept frame, number and second in the name
   frame-02-0.50s.jpg
   ...
-  sheet-01.jpg           contact sheets, within 1568 px on both sides, every tile under its number and time
+  sheet-01.jpg           contact sheets, within 1568 px on both sides, every tile under its number and time, changes boxed
   frames.json            the manifest, see below
 ```
 
 Every tile of a sheet has a band above it with the frame's number and time, `#07 12.25s` for `frame-07-12.25s.jpg`, so a frame is cited and rechecked without counting tiles. The band is drawn with a built-in pixel font, so it needs nothing beyond ffmpeg itself; the frame files and `recheck` stay without it.
+
+On the default selector a change gets a magenta box on the first tile that shows it, a few pixels outside the changed area, so the eye goes straight to a 16 px checkbox on a 2120 px strip. The boxes come from the `region`s of `events` in `frames.json`, and a change gets one only where enough of its pixels changed since the tile before, counted at full resolution: an area that changed and changed back in between (the pointer passing over it) and codec noise on text get none. Boxes closer than 6 px are joined into one, a box over more than half of the tile is dropped together with anything joined to it, and a tile with more than 12 separate boxes gets none. With options that put far more tiles on a sheet than the defaults, a sheet whose boxes would not fit on the Windows command line is drawn without them. So a tile without boxes can still hold changes; `events` lists them all. Like the band, the boxes are on the sheets only; the frame files and `recheck` stay clean for reading digits.
 
 The console says what happened and does not hide a bad outcome.
 
@@ -161,6 +163,7 @@ For the default selector (the legacy one keeps its own, older ones).
 
 - Four samples per second: a state shorter than a quarter of a second (a flash, a tooltip) can be missed.
 - Pixel difference is not understanding. A frame is kept because the picture changed, not because something happened.
+- A box marks changed pixels, not a meaningful change. When the pointer moves in the same quarter second as a change, the pointer is boxed too.
 - A change of fewer than 12 pixels is taken for codec noise, and two alike pointer-sized changes with nothing else in the same sample are taken for the pointer, so a radio button's dot moving between two options is counted as a pointer move.
 - A 2 px text caret across two cells, a terminal's block cursor and the caret of a 3x phone recording are not recognised as blinking and count as changes.
 - Over the cap, short states inside a quick series (the first click of a double click) are the first to go.

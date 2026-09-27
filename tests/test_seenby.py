@@ -7,7 +7,7 @@ import random
 import shlex
 import subprocess
 import sys
-from itertools import product
+from itertools import combinations, permutations, product
 
 import pytest
 from hypothesis import given, settings, strategies as st
@@ -1411,12 +1411,16 @@ class Run:
     `save_samples` returns `frames` like `save_frames`, one path per index when `frames` is None.
     `display_size` returns `(width, height)` unchanged, or `display` when given (raised when it is an exception).
     `ffmpeg_version` returns `version`.
+    `contact_sheets` takes `boxes` as a fifth argument, default None (BOX-3), recorded in `contact_sheets_boxes`
+    beside `contact_sheets_calls`, and the number of arguments of each call in `contact_sheets_arity`.
+    `kept_changes` returns `changes`, or raises it when it is an exception; without `changes` it returns `None`
+    for the first index and two all-zero 20 x 10 grids for every other (BOX-3 examples).
     `watch` is a path whose existence is recorded at the moment each fake is called.
     """
 
     def __init__(
         self, monkeypatch, probe, thumbs, frames, sheets, tools, watch, samples=None, display=None,
-        version=FFMPEG_VERSION_LINE,
+        version=FFMPEG_VERSION_LINE, changes=None,
     ):
         self.probe_calls = []
         self.thumbnails_calls = []
@@ -1425,6 +1429,10 @@ class Run:
         self.save_frames_calls = []
         self.save_samples_calls = []
         self.contact_sheets_calls = []
+        self.contact_sheets_boxes = []
+        self.contact_sheets_arity = []
+        self.kept_changes_calls = []
+        self.saved_samples = []
         self.ffmpeg_version_calls = 0
         self.watched = {}
 
@@ -1467,15 +1475,29 @@ class Run:
             note("save_samples")
             self.save_samples_calls.append((path, indices, times, out_dir, tile_width, fps, start, length))
             if frames is None:
-                return [f"{out_dir}/frame-{i:02d}.jpg" for i in range(1, len(indices) + 1)]
-            return outcome(frames)
+                self.saved_samples = [f"{out_dir}/frame-{i:02d}.jpg" for i in range(1, len(indices) + 1)]
+            else:
+                self.saved_samples = outcome(frames)
+            return self.saved_samples
 
-        def fake_contact_sheets(paths, out_dir, cols, rows):
+        def fake_kept_changes(path, indices, width, height, fps=4, start=0.0, length=None):
+            note("kept_changes")
+            self.kept_changes_calls.append((path, indices, width, height, fps, start, length))
+            if changes is None:
+                return [None] + [(bytes(20 * 10), bytes(20 * 10))] * (len(indices) - 1)
+            return outcome(changes)
+
+        def fake_contact_sheets(paths, out_dir, cols, rows, boxes=None):
             note("contact_sheets")
             self.contact_sheets_calls.append((paths, out_dir, cols, rows))
+            self.contact_sheets_boxes.append(boxes)
             if sheets is None:
                 return [f"{out_dir}/sheet-01.jpg"]
             return outcome(sheets)
+
+        def counted_contact_sheets(*args, **kwargs):
+            self.contact_sheets_arity.append(len(args) + len(kwargs))
+            return fake_contact_sheets(*args, **kwargs)
 
         def fake_require_tools():
             return tools
@@ -1490,7 +1512,8 @@ class Run:
         monkeypatch.setattr(seenby, "change_grids", fake_change_grids, raising=False)
         monkeypatch.setattr(seenby, "save_frames", fake_save_frames)
         monkeypatch.setattr(seenby, "save_samples", fake_save_samples, raising=False)
-        monkeypatch.setattr(seenby, "contact_sheets", fake_contact_sheets)
+        monkeypatch.setattr(seenby, "contact_sheets", counted_contact_sheets)
+        monkeypatch.setattr(seenby, "kept_changes", fake_kept_changes, raising=False)
         monkeypatch.setattr(seenby, "require_tools", fake_require_tools)
         monkeypatch.setattr(seenby, "ffmpeg_version", fake_ffmpeg_version)
 
@@ -1511,6 +1534,7 @@ def run_main(
     display=None,
     version=FFMPEG_VERSION_LINE,
     as_given=False,
+    changes=None,
 ):
     """main() with the fakes in place. Unless `as_given`, an argv without `--selector` gets the selector its row
     implies (CLI-28): `legacy` for a row that fakes only `thumbnails`, `events` for one that fakes `change_grids`."""
@@ -1521,7 +1545,7 @@ def run_main(
         video.write_bytes(b"")
     if not as_given and "--selector" not in argv:
         argv = argv + ["--selector", "legacy" if samples is None else "events"]
-    run = Run(monkeypatch, probe, thumbs, frames, sheets, tools, watch, samples, display, version)
+    run = Run(monkeypatch, probe, thumbs, frames, sheets, tools, watch, samples, display, version, changes)
     monkeypatch.setattr(sys, "argv", ["seenby.py"] + argv)
     run.rc = seenby.main()
     captured = capsys.readouterr()
@@ -5907,3 +5931,299 @@ def test_lbl_3_man_7_12_square_frames_spread_over_sheets_of_six(monkeypatch, cap
         {"file": "sheet-02.jpg", "frames": [7, 11]},
     ]
     assert data["sheet"] == {"cols": 3, "rows": 2, "tile_width": 500, "sheet_width": 1568, "count": 2}
+
+
+# ---------------------------------------------------------------- Step 15: a box around each change on the sheets
+
+# BOX_GAP + BOX_T, BOX_NEAR, BOX_SHARE and BOX_MAX of the spec, pinned by test_box_1_constants_have_the_spec_values.
+BOX_PAD, BOX_NEAR_PX, BOX_SHARE_OF_TILE, BOX_MOST = 2 + 3, 6, 0.5, 12
+
+
+def box_rect(region, native_width, width):
+    """BOX-1 step 1: `(x0, y0, x1, y1)` of a region on the tile, `x1` and `y1` exclusive."""
+    x, y, w, h = region
+    return (
+        x * width // native_width - BOX_PAD,
+        y * width // native_width - BOX_PAD,
+        -(-(x + w) * width // native_width) + BOX_PAD,
+        -(-(y + h) * width // native_width) + BOX_PAD,
+    )
+
+
+def rects_near(a, b):
+    """BOX-1 step 2."""
+    return (
+        a[0] - BOX_NEAR_PX < b[2] and b[0] - BOX_NEAR_PX < a[2]
+        and a[1] - BOX_NEAR_PX < b[3] and b[1] - BOX_NEAR_PX < a[3]
+    )
+
+
+def part_on_tile(rect, width, height):
+    """BOX-1 step 3."""
+    x0, y0, x1, y1 = rect
+    return (max(0, x0), max(0, y0), min(width, x1), min(height, y1))
+
+
+def part_area(rect, width, height):
+    x0, y0, x1, y1 = part_on_tile(rect, width, height)
+    return max(0, x1 - x0) * max(0, y1 - y0)
+
+
+def boxes_as_written(regions, native_width, width, height):
+    """The five steps of BOX-1, one at a time: the share test on the part on the tile, the box not cut."""
+    rects = [box_rect(region, native_width, width) for region in regions]
+    joined = True
+    while joined:
+        joined = False
+        for i, j in combinations(range(len(rects)), 2):
+            a, b = rects[i], rects[j]
+            if rects_near(a, b):
+                rects[i] = (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+                del rects[j]
+                joined = True
+                break
+    rects = [r for r in rects if part_area(r, width, height) <= BOX_SHARE_OF_TILE * width * height]
+    if len(rects) > BOX_MOST:
+        return []
+    return sorted(((x0, y0, x1 - x0, y1 - y0) for x0, y0, x1, y1 in rects), key=lambda b: (b[1], b[0]))
+
+
+def box_p1_region():
+    return st.tuples(st.integers(min_value=8, max_value=80), st.integers(min_value=8, max_value=80)).flatmap(
+        lambda wh: st.tuples(
+            st.integers(min_value=0, max_value=1552 - wh[0]), st.integers(min_value=0, max_value=800 - wh[1])
+        ).map(lambda xy: [xy[0], xy[1], wh[0], wh[1]])
+    )
+
+
+box_p1_regions_st = st.lists(box_p1_region(), min_size=0, max_size=6)
+
+
+# -------- BOX-1 (change_boxes)
+
+
+@pytest.mark.spec("BOX-1")
+@pytest.mark.parametrize(
+    "name, value",
+    [("BOX_T", 3), ("BOX_GAP", 2), ("BOX_NEAR", 6), ("BOX_SHARE", 0.5), ("BOX_MAX", 12)],
+)
+def test_box_1_constants_have_the_spec_values(name, value):
+    assert getattr(seenby, name) == value
+
+
+@pytest.mark.spec("BOX-1")
+@pytest.mark.parametrize(
+    "regions, native_width, width, height, expected",
+    [
+        ([], 160, 160, 80, []),
+        ([[16, 16, 24, 24], [96, 16, 24, 24]], 160, 160, 80, [(11, 11, 34, 34), (91, 11, 34, 34)]),
+        ([[96, 16, 24, 24], [16, 16, 24, 24]], 160, 160, 80, [(11, 11, 34, 34), (91, 11, 34, 34)]),
+        ([[1384, 88, 16, 16]], 2120, 776, 154, [(501, 27, 17, 17)]),
+        ([[1384, 88, 16, 16], [1480, 88, 56, 16]], 2120, 776, 154, [(501, 27, 17, 17), (536, 27, 32, 17)]),
+        ([[16, 16, 24, 24], [55, 16, 24, 24]], 160, 160, 80, [(11, 11, 73, 34)]),
+        ([[16, 16, 24, 24], [56, 16, 24, 24]], 160, 160, 80, [(11, 11, 34, 34), (51, 11, 34, 34)]),
+        ([[72, 24, 8, 8], [40, 40, 8, 8], [56, 56, 8, 8]], 160, 160, 80, [(35, 19, 50, 50)]),
+        ([[72, 24, 8, 8], [40, 40, 8, 8]], 160, 160, 80, [(67, 19, 18, 18), (35, 35, 18, 18)]),
+        ([[0, 0, 24, 24]], 160, 160, 80, [(-5, -5, 34, 34)]),
+        ([[0, 0, 160, 80]], 160, 160, 80, []),
+        ([[5, 5, 40, 90]], 100, 100, 100, [(0, 0, 50, 100)]),
+        ([[5, 5, 41, 90]], 100, 100, 100, []),
+        ([[0, 0, 45, 90]], 100, 100, 100, [(-5, -5, 55, 100)]),
+        ([[0, 0, 46, 95]], 100, 100, 100, []),
+        ([[24 * i, 0, 8, 8] for i in range(13)], 400, 400, 100, []),
+    ],
+    ids=[
+        "no-regions", "two-apart", "two-apart-swapped", "checkbox-on-a-2120-px-strip", "two-checkboxes-18-px-apart",
+        "5-px-apart-joined", "6-px-apart-not-joined", "joined-then-near-the-union", "two-not-near",
+        "not-cut-at-the-tile-edge", "the-whole-tile", "exactly-half-the-tile-kept", "over-half-the-tile-dropped",
+        "corner-part-on-the-tile-under-half-kept", "corner-part-on-the-tile-over-half-dropped", "thirteen-boxes-none",
+    ],
+)
+def test_box_1_change_boxes_example_rows(regions, native_width, width, height, expected):
+    assert seenby.change_boxes(regions, native_width, width, height) == expected
+
+
+@pytest.mark.spec("BOX-1")
+def test_box_1_twelve_boxes_are_kept():
+    result = seenby.change_boxes([[24 * i, 0, 8, 8] for i in range(12)], 400, 400, 100)
+    assert len(result) == 12
+    assert result[:2] == [(-5, -5, 18, 18), (19, -5, 18, 18)]
+
+
+@pytest.mark.spec("BOX-1")
+@pytest.mark.parametrize(
+    "regions",
+    list(permutations([[72, 24, 8, 8], [40, 40, 8, 8], [56, 56, 8, 8]])),
+    ids=[f"order-{i}" for i in range(6)],
+)
+def test_box_1_a_rectangle_near_only_a_joined_one_is_joined_in_every_order(regions):
+    assert seenby.change_boxes(list(regions), 160, 160, 80) == [(35, 19, 50, 50)]
+
+
+@pytest.mark.spec("BOX-1")
+@settings(deadline=None)
+@given(regions=box_p1_regions_st)
+def test_box_1_change_boxes_equals_the_five_steps_as_written(regions):
+    assert seenby.change_boxes(regions, 1552, 776, 400) == boxes_as_written(regions, 1552, 776, 400)
+
+
+@pytest.mark.spec("BOX-P1")
+@settings(deadline=None)
+@given(regions=box_p1_regions_st)
+def test_box_p1_boxes_are_order_free_on_the_tile_apart_sorted_and_hold_every_region(regions):
+    result = seenby.change_boxes(regions, 1552, 776, 400)
+    assert isinstance(result, list)
+    assert all(isinstance(b, tuple) and len(b) == 4 and all(type(v) is int for v in b) for b in result)
+    assert all(seenby.change_boxes(list(order), 1552, 776, 400) == result for order in permutations(regions))
+    assert all(w > 0 and h > 0 and x < 776 and y < 400 and x + w > 0 and y + h > 0 for x, y, w, h in result)
+    rects = [(x, y, x + w, y + h) for x, y, w, h in result]
+    assert not any(rects_near(a, b) for a, b in combinations(rects, 2))
+    assert result == sorted(result, key=lambda b: (b[1], b[0]))
+    for region in regions:
+        x0, y0, x1, y1 = box_rect(region, 1552, 776)
+        assert any(bx <= x0 and by <= y0 and x1 <= bx + bw and y1 <= by + bh for bx, by, bw, bh in result)
+
+
+# -------- BOX-2 (contact_sheets takes the boxes; amends LBL-2) is [hands-on] beyond its empty input
+
+
+@pytest.mark.spec("BOX-2")
+def test_box_2_no_frames_with_boxes_give_no_sheets(tmp_path):
+    assert seenby.contact_sheets([], str(tmp_path), 3, 2, []) == []
+    assert seenby.contact_sheets([], str(tmp_path), 3, 2, boxes=None) == []
+
+
+# -------- BOX-3 (main() passes the boxes to contact_sheets; amends CLI-26)
+
+TWO_BOXES = [[], [(11, 11, 34, 34), (91, 11, 34, 34)], [(11, 11, 34, 34)]]
+Z, CA, CB = grid({}), grid(box(2, 2, 3, 3)), grid(box(12, 2, 3, 3))
+CAB = grid(box(2, 2, 3, 3) | box(12, 2, 3, 3))
+TWO_CHANGES = [None, (CAB, Z), (CA, Z)]
+
+
+@pytest.mark.spec("BOX-3")
+@pytest.mark.parametrize("name, value", [("BOX_SPREAD", 64), ("BOX_STRONG", 4)])
+def test_box_3_constants_have_the_spec_values(name, value):
+    assert getattr(seenby, name) == value
+
+
+@pytest.mark.spec("BOX-3")
+@pytest.mark.spec("CLI-28")
+def test_box_3_each_event_is_boxed_on_the_first_frame_that_shows_it(monkeypatch, capsys, tmp_path):
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(4),
+        probe=EVENTS_PROBE, samples=events_two(), as_given=True, changes=TWO_CHANGES,
+    )
+    assert run.rc == 0
+    assert run.kept_changes_calls == [("clip.mp4", [0, 4, 6], 160, 80, 4, 0.0, None)]
+    assert len(run.contact_sheets_calls) == 1
+    assert run.contact_sheets_boxes == [TWO_BOXES]
+    assert run.out == (
+        EVENTS_TWO_DRY_RUN_STDOUT
+        + "  contact sheets: out/sheet-01.jpg\n"
+        + MANIFEST_LINE.format(out_dir="out") + "\n"
+    )
+    data = manifest()
+    assert list(data) == EVENTS_TOP_LEVEL_KEYS
+    assert list(data["analysis"]) == EVENTS_ANALYSIS_KEYS
+    assert all(list(frame) == EVENTS_FRAME_KEYS for frame in data["frames"])
+    assert [(f["time"], f["reason"]) for f in data["frames"]] == [(0.0, "first"), (1.0, "change"), (1.5, "last")]
+    assert data["events"] == [
+        {"from": 0.25, "settled": 0.25, "until": 1.0, "region": [16, 16, 24, 24], "changed_px": 576, "shown": True},
+        {"from": 0.75, "settled": 0.75, "until": 1.5, "region": [96, 16, 24, 24], "changed_px": 576, "shown": True},
+        {"from": 1.25, "settled": 1.25, "until": 1.5, "region": [16, 16, 24, 24], "changed_px": 576, "shown": True},
+    ]
+
+
+@pytest.mark.spec("BOX-3")
+@pytest.mark.parametrize(
+    "extra, probe, changes, call, boxes",
+    [
+        ([], EVENTS_PROBE, None, ("clip.mp4", [0, 4, 6], 160, 80, 4, 0.0, None), [[], [], []]),
+        (
+            ["--max-frames", "2"], EVENTS_PROBE, [None, (CB, Z)], ("clip.mp4", [0, 6], 160, 80, 4, 0.0, None),
+            [[], [(91, 11, 34, 34)]],
+        ),
+        (["--from", "1"], (3.0, 160, 80), TWO_CHANGES, ("clip.mp4", [0, 4, 6], 160, 80, 4, 1.0, 2.0), TWO_BOXES),
+    ],
+    ids=["no-entries-all-zero-no-box", "max-frames-2-only-B-changed-since-0", "from-1"],
+)
+def test_box_3_boxes_per_frame(monkeypatch, capsys, tmp_path, extra, probe, changes, call, boxes):
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out"] + extra, static(4),
+        probe=probe, samples=events_two(), as_given=True, changes=changes,
+    )
+    assert run.rc == 0
+    assert run.kept_changes_calls == [call]
+    assert run.contact_sheets_boxes == [boxes]
+
+
+@pytest.mark.spec("BOX-3")
+@pytest.mark.parametrize(
+    "changes, boxes",
+    [
+        ([None, (grid({(2, 2): 255}), Z), (Z, Z)], [[], [(11, 11, 34, 34)], []]),
+        ([None, (grid({(2, 2): 254}), Z), (Z, Z)], [[], [], []]),
+        ([None, (Z, grid({(4, 4): 16})), (Z, Z)], [[], [(11, 11, 34, 34)], []]),
+        ([None, (Z, grid({(4, 4): 15})), (Z, Z)], [[], [], []]),
+        ([None, (grid({(5, 2): 255, (1, 4): 255, (3, 5): 255}), Z), (Z, Z)], [[], [], []]),
+    ],
+    ids=[
+        "over-255-is-64-px-boxed", "over-254-is-63.75-px-no-box",
+        "far-16-is-4.0157-px-boxed", "far-15-is-3.7647-px-no-box",
+        "cells-right-left-and-under-A-no-box",
+    ],
+)
+def test_box_3_a_box_needs_box_spread_px_past_pixel_t_or_box_strong_px_past_twice_it(
+    monkeypatch, capsys, tmp_path, changes, boxes
+):
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(4),
+        probe=EVENTS_PROBE, samples=events_two(), as_given=True, changes=changes,
+    )
+    assert run.rc == 0
+    assert run.contact_sheets_boxes == [boxes]
+
+
+@pytest.mark.spec("BOX-3")
+def test_box_3_boxes_are_scaled_onto_a_tile_narrower_than_the_frame(monkeypatch, capsys, tmp_path):
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(4),
+        probe=(2.0, 1600, 80), samples=events_two(), as_given=True, changes=TWO_CHANGES,
+    )
+    assert run.rc == 0
+    assert "  layout: wide, tile 776 px, 2x24 per sheet" in run.out.splitlines()
+    assert run.contact_sheets_boxes == [[[], [(2, 2, 23, 23), (41, 2, 23, 23)], [(2, 2, 23, 23)]]]
+
+
+@pytest.mark.spec("BOX-3")
+def test_box_3_one_frame_calls_neither_kept_changes_nor_contact_sheets(monkeypatch, capsys, tmp_path):
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(4),
+        probe=EVENTS_PROBE, samples=[S({})], as_given=True,
+    )
+    assert run.rc == 0
+    assert len(run.saved_samples) == 1
+    assert run.kept_changes_calls == []
+    assert run.contact_sheets_calls == []
+
+
+@pytest.mark.spec("BOX-3")
+def test_box_3_a_kept_changes_failure_is_reported_under_the_sheets_stage(monkeypatch, capsys, tmp_path):
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(4),
+        probe=EVENTS_PROBE, samples=events_two(), as_given=True,
+        changes=subprocess.CalledProcessError(1, ["ffmpeg"], stderr="x\nboom\n"),
+    )
+    assert run.rc == 1
+    assert "ffmpeg failed during sheets (exit 1): boom" in run.err
+    assert "Traceback" not in run.err
+
+
+@pytest.mark.spec("BOX-3")
+def test_box_3_the_legacy_selector_calls_contact_sheets_with_four_arguments(monkeypatch, capsys, tmp_path):
+    run = run_main(monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--selector", "legacy"], static(30))
+    assert run.rc == 0
+    assert run.contact_sheets_arity == [4]
+    assert run.contact_sheets_boxes == [None]
+    assert run.kept_changes_calls == []

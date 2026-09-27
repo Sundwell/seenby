@@ -15,8 +15,9 @@ event, plus the first and the last, up to a cap. The legacy selector
 frame against a threshold, with a timer and a cap that raises the threshold.
 
 Output: individual frames, contact sheets (each sheet a single image an agent
-can read in one go) and `frames.json`, the manifest with the time and reason
-of every frame plus a ready `recheck` command that extracts the native frame.
+can read in one go, changes boxed on the first tile that shows them) and
+`frames.json`, the manifest with the time and reason of every frame plus a
+ready `recheck` command that extracts the native frame.
 Sheets are for meaning; digits are read from the native frame. Tile width is
 at least 260 px for phone footage and 780 px for desktop footage, otherwise
 small UI text becomes unreadable.
@@ -73,6 +74,13 @@ HOLD_SHARE = 0.25    # share of an event's cells that may differ before its stat
 BLINK_REPEATS = 4    # a one-cell-wide spot flipping between two looks this often, briefly, is a blinking caret
 CARET_H = 64         # px, the tallest box such a spot may have
 LABEL_H = 22         # px, the band above each tile of a sheet with the frame's number and time
+BOX_T = 3            # px, the outline of a change box on a sheet
+BOX_GAP = 2          # px between a change and the inner edge of its box
+BOX_NEAR = 6         # px, boxes closer than this on both axes are joined
+BOX_SHARE = 0.5      # a joined box covering more of the tile than this is dropped
+BOX_MAX = 12         # a tile with more boxes than this gets none
+BOX_SPREAD = 64      # px changed past PIXEL_T since the frame before that make a change visible
+BOX_STRONG = 4       # px changed past twice PIXEL_T that do the same
 _SAMPLES = 'fps=%g:round=up:start_time=0'
 _GLYPHS = {
     '0': '01110 10001 10011 10101 11001 10001 01110', '1': '00100 01100 00100 00100 00100 00100 01110',
@@ -626,6 +634,15 @@ def _blinking(events, samples, gw, fps):
     return out
 
 
+def _visible(e, changes, gw):
+    # changed and changed back between two kept frames, or codec noise on text, leaves few and faint pixels
+    over, far = changes
+    scale = CELL * CELL / 255.0
+    rows = _rows(e, gw)
+    return (sum(sum(over[r]) for r in rows) * scale >= BOX_SPREAD
+            or sum(sum(far[r]) for r in rows) * scale >= BOX_STRONG)
+
+
 def select_events(samples, gw, gh, budget, fps=EVENT_FPS):
     """Frames by the events selector, each with its reason, and every change found."""
     if not samples:
@@ -795,6 +812,33 @@ def save_samples(path, indices, times, out_dir, tile_width, fps=EVENT_FPS, start
     return paths
 
 
+def kept_changes(path, indices, width, height, fps=EVENT_FPS, start=0.0, length=None):
+    """Per kept sample, the cells' shares of pixels changed past PIXEL_T and past twice that since the one before."""
+    cw, ch = width // CELL * CELL, height // CELL * CELL
+    gw, gh = cw // CELL, ch // CELL
+    pool = 'scale=%d:%d:flags=area+accurate_rnd' % (gw, gh)
+    select = '+'.join('eq(n\\,%d)' % k for k in indices)
+    graph = ("[0:v]" + _SAMPLES + ",select='%s',format=pix_fmts=yuv420p|yuvj420p|yuv422p|yuvj422p|yuv444p|yuvj444p|"
+             "gray,extractplanes=y,setrange=full,crop=%d:%d:0:0,tblend=all_mode=difference,split[a][b];"
+             "[a]lut=c0='if(gt(val,%d),255,0)',%s[o];[b]lut=c0='if(gt(val,%d),255,0)',%s[f]"
+             ) % (fps, select, cw, ch, PIXEL_T, pool, 2 * PIXEL_T, pool)
+    span = [] if length is None else ['-t', '%.3f' % length]
+    keep = [passthrough(ffmpeg_version()), 'passthrough']
+    with tempfile.TemporaryDirectory() as tmp:
+        over, far = os.path.join(tmp, 'over'), os.path.join(tmp, 'far')
+        subprocess.run([ffmpeg(), '-v', 'error', '-ss', '%.3f' % start] + span + ['-i', path, '-filter_complex', graph,
+                        '-map', '[o]'] + keep + ['-pix_fmt', 'gray', '-f', 'rawvideo', over,
+                        '-map', '[f]'] + keep + ['-pix_fmt', 'gray', '-f', 'rawvideo', far],
+                       capture_output=True, check=True)
+        with open(over, 'rb') as f:
+            o = f.read()
+        with open(far, 'rb') as f:
+            g = f.read()
+    n = gw * gh
+    pairs = [(o[i:i + n], g[i:i + n]) for i in range(0, min(len(o), len(g)) - n + 1, n)]
+    return [None] + pairs[len(pairs) - len(indices) + 1:]
+
+
 def label_band(text, width):
     """A white band LABEL_H px high and `width` wide with `text` in a 5x7 font at double size, as PGM bytes."""
     band = [bytearray(b'\xff') * width for _ in range(LABEL_H - 1)] + [bytearray(width)]
@@ -809,8 +853,35 @@ def label_band(text, width):
     return b'P5\n%d %d\n255\n' % (width, LABEL_H) + b''.join(band)
 
 
-def contact_sheets(paths, out_dir, cols, rows):
-    """Tile frames into `cols x rows` images, each frame under a band with its number and time.
+def change_boxes(regions, native_width, width, height):
+    """Boxes to draw around `regions` on a tile: scaled, padded, joined when close, dropped when they cover the tile."""
+    pad = BOX_GAP + BOX_T
+    boxes = [[x * width // native_width - pad, y * width // native_width - pad,
+              -(-(x + w) * width // native_width) + pad, -(-(y + h) * width // native_width) + pad]
+             for x, y, w, h in regions]
+    joined = True
+    while joined:
+        joined = False
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                a, b = boxes[i], boxes[j]
+                if (a[0] - BOX_NEAR < b[2] and b[0] - BOX_NEAR < a[2]
+                        and a[1] - BOX_NEAR < b[3] and b[1] - BOX_NEAR < a[3]):
+                    boxes[i] = [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
+                    del boxes[j]
+                    joined = True
+                    break
+            if joined:
+                break
+    out = []
+    for x0, y0, x1, y1 in boxes:
+        if (min(width, x1) - max(0, x0)) * (min(height, y1) - max(0, y0)) <= BOX_SHARE * width * height:
+            out.append((x0, y0, x1 - x0, y1 - y0))
+    return [] if len(out) > BOX_MAX else sorted(out, key=lambda b: (b[1], b[0]))
+
+
+def contact_sheets(paths, out_dir, cols, rows, boxes=None):
+    """Tile frames into `cols x rows` images, each frame under a band with its number and time, its `boxes` drawn on it.
 
     Several sheets rather than one big one: vision models downscale an image
     to roughly 1568 px on the long side. One landscape sheet of 24 frames in
@@ -843,10 +914,15 @@ def contact_sheets(paths, out_dir, cols, rows):
                     f.write("file '%s'\n" % os.path.abspath(path).replace("'", "'\\''"))
                     b.write("file '%s'\n" % band.replace("'", "'\\''"))
             here = min(cols, len(batch))
+            draw = ''.join(",drawbox=x=%d:y=%d:w=%d:h=%d:color=0xff00ff:t=%d:enable='eq(n,%d)'" % (x, y, w, h, BOX_T, i)
+                           for i, frame in enumerate((boxes or [])[start:start + per_sheet]) for x, y, w, h in frame)
+            if len(draw) > 30000:
+                # the command line of Windows holds 32767 characters
+                draw = ''
             # concat gives the band images broken timestamps and vstack pairs by timestamp, so both are renumbered
-            graph = ('[0:v]setpts=N,format=%s[f];[1:v]setpts=N,format=%s[b];[b][f]vstack=shortest=1,'
+            graph = ('[0:v]setpts=N,format=%s%s[f];[1:v]setpts=N,format=%s[b];[b][f]vstack=shortest=1,'
                      'tile=%dx%d:margin=%d:padding=%d'
-                     % (fmt, fmt, here, math.ceil(len(batch) / here), MARGIN, PADDING))
+                     % (fmt, draw, fmt, here, math.ceil(len(batch) / here), MARGIN, PADDING))
             subprocess.run([ffmpeg(), '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', frames,
                             '-f', 'concat', '-safe', '0', '-i', bands, '-filter_complex', graph,
                             '-frames:v', '1', sheet], check=True)
@@ -919,7 +995,18 @@ def _run_events(args, out_dir, start, end, ranged, duration, width, height):
         stage = 'frames'
         paths = save_samples(args.video, points, times, out_dir, tile_width, EVENT_FPS, start, length)
         stage = 'sheets'
-        sheets = contact_sheets(paths, out_dir, cols, rows) if len(paths) > 1 else []
+        sheets = []
+        if len(paths) > 1:
+            changes = kept_changes(args.video, points, width, height, EVENT_FPS, start, length)
+            regions = [[] for _ in points]
+            for e in events:
+                i = bisect.bisect_left(points, e['settled'])
+                first = 0 < i < len(points) and points[i] <= e['until']
+                if first and _visible(e, changes[i], gw):
+                    regions[i].append([e['x'], e['y'], e['w'], e['h']])
+            tile_height = (tile_width * height + width // 2) // width
+            boxes = [change_boxes(r, width, tile_width, tile_height) for r in regions]
+            sheets = contact_sheets(paths, out_dir, cols, rows, boxes)
         stage = 'version'
         version = ffmpeg_version()
     except ValueError as e:
