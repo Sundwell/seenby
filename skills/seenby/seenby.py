@@ -81,6 +81,10 @@ BOX_SHARE = 0.5      # a joined box covering more of the tile than this is dropp
 BOX_MAX = 12         # a tile with more boxes than this gets none
 BOX_SPREAD = 24      # px changed past PIXEL_T in 2x2 cells since the frame before that make a change visible
 BOX_STRONG = 5       # px changed past twice PIXEL_T in 2x2 cells that do the same
+CROP_MARGIN = 16     # px of the screen kept around a change in its crop
+CROP_JOIN = 128      # px, changes settling in the same sample closer than this share one crop
+CROP_SHARE = 0.1     # while that crop stays within this share of the frame
+SCREEN_SHARE = 0.25  # changes covering this share of the frame start a screen with a full frame of its own
 _SAMPLES = 'fps=%g:round=up:start_time=0'
 _GLYPHS = {
     '0': '01110 10001 10011 10101 11001 10001 01110', '1': '00100 01100 00100 00100 00100 00100 01110',
@@ -89,7 +93,7 @@ _GLYPHS = {
     '6': '00110 01000 10000 11110 10001 10001 01110', '7': '11111 00001 00010 00100 01000 01000 01000',
     '8': '01110 10001 10001 01110 10001 10001 01110', '9': '01110 10001 10001 01111 00001 00010 01100',
     '#': '01010 01010 11111 01010 11111 01010 01010', '.': '00000 00000 00000 00000 00000 01100 01100',
-    's': '00000 00000 01110 10000 01110 00001 11110',
+    's': '00000 00000 01110 10000 01110 00001 11110', '>': '10000 01000 00100 00010 00100 01000 10000',
 }
 _ACTIVE = bytes(1 if v >= MIN_CELL else 0 for v in range(256))
 
@@ -758,8 +762,9 @@ def clean(out_dir):
     pieces of the previous video as this one.
     """
     for name in os.listdir(out_dir):
-        ours = (name.startswith('frame-') or name.startswith('sheet')) and name.endswith('.jpg')
-        if ours or name in ('frames.json', 'report.md'):
+        ours = (name.startswith('frame-') or name.startswith('sheet') or name.startswith('screen-')) and \
+            name.endswith('.jpg') or name.startswith('crops-') and name.endswith('.png')
+        if ours or name in ('frames.json', 'report.md', 'crops.json'):
             os.remove(os.path.join(out_dir, name))
 
 
@@ -884,8 +889,27 @@ def change_boxes(regions, native_width, width, height):
     return [] if len(out) > BOX_MAX else sorted(out, key=lambda b: (b[1], b[0]))
 
 
-def contact_sheets(paths, out_dir, cols, rows, boxes=None):
-    """Tile frames into `cols x rows` images, each frame under a band with its number and time, its `boxes` drawn on it.
+def mark_image(width, height, marks):
+    """An RGBA PAM `width` x `height`, transparent but for `marks` [(x, y, text)]: magenta digits on white, 18 px high."""
+    px = bytearray(width * height * 4)
+    for x0, y0, text in marks:
+        for y in range(max(0, y0), min(height, y0 + 18)):
+            for x in range(max(0, x0), min(width, x0 + 12 * len(text) + 2)):
+                px[4 * (y * width + x):4 * (y * width + x) + 4] = b'\xff\xff\xff\xff'
+        for i, ch in enumerate(text):
+            for r, bits in enumerate(_GLYPHS.get(ch, '').split()):
+                for c, bit in enumerate(bits):
+                    if bit == '1':
+                        for y in (y0 + 2 + 2 * r, y0 + 3 + 2 * r):
+                            for x in (x0 + 2 + 12 * i + 2 * c, x0 + 3 + 12 * i + 2 * c):
+                                if 0 <= x < width and 0 <= y < height:
+                                    px[4 * (y * width + x):4 * (y * width + x) + 4] = b'\xff\x00\xff\xff'
+    return b'P7\nWIDTH %d\nHEIGHT %d\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n' % (width, height) + bytes(px)
+
+
+def contact_sheets(paths, out_dir, cols, rows, boxes=None, marks=None):
+    """Tile frames into `cols x rows` images, each frame under a band with its number and time, its `boxes` drawn on it,
+    its `marks` [(x, y, text)] written next to them.
 
     Several sheets rather than one big one: vision models downscale an image
     to roughly 1568 px on the long side. One landscape sheet of 24 frames in
@@ -900,6 +924,11 @@ def contact_sheets(paths, out_dir, cols, rows, boxes=None):
     if len(probed) != 2 or not probed[0].isdigit():
         raise ValueError('ffprobe could not read the frame width of %s' % paths[0])
     width, fmt = int(probed[0]), probed[1]
+    tile_height = 0
+    if marks and any(marks):
+        tile_height = int(subprocess.run([ffprobe(), '-v', 'error', '-select_streams', 'v:0', '-show_entries',
+                                          'stream=height', '-of', 'csv=p=0', paths[0]],
+                                         capture_output=True, text=True, check=True).stdout.split()[0])
     per_sheet = cols * rows
     sheets = []
     for n, start in enumerate(range(0, len(paths), per_sheet), 1):
@@ -927,11 +956,276 @@ def contact_sheets(paths, out_dir, cols, rows, boxes=None):
             graph = ('[0:v]setpts=N,format=%s%s[f];[1:v]setpts=N,format=%s[b];[b][f]vstack=shortest=1,'
                      'tile=%dx%d:margin=%d:padding=%d'
                      % (fmt, draw, fmt, here, math.ceil(len(batch) / here), MARGIN, PADDING))
+            extra = []
+            here_marks = [(MARGIN + (i % here) * (width + PADDING) + x,
+                           MARGIN + (i // here) * (tile_height + LABEL_H + PADDING) + LABEL_H + y, text)
+                          for i, frame in enumerate((marks or [])[start:start + per_sheet]) for x, y, text in frame]
+            if here_marks:
+                # drawn by seenby into a transparent layer: drawtext needs a font, and a drawbox per pixel is too long
+                layer = os.path.join(tmp, 'marks.pam')
+                with open(layer, 'wb') as g:
+                    g.write(mark_image(2 * MARGIN + here * (width + PADDING),
+                                       2 * MARGIN + math.ceil(len(batch) / here) * (tile_height + LABEL_H + PADDING),
+                                       here_marks))
+                extra = ['-i', layer]
+                graph += '[t];[t][2:v]overlay=0:0,format=%s' % fmt
             subprocess.run([ffmpeg(), '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', frames,
-                            '-f', 'concat', '-safe', '0', '-i', bands, '-filter_complex', graph,
+                            '-f', 'concat', '-safe', '0', '-i', bands] + extra + ['-filter_complex', graph,
                             '-frames:v', '1', sheet], check=True)
         sheets.append(sheet)
     return sheets
+
+
+def _cells(rects):
+    return {(cx, cy) for x, y, w, h in rects for cx in range(x // CELL, (x + w - 1) // CELL + 1)
+            for cy in range(y // CELL, (y + h - 1) // CELL + 1)}
+
+
+def _join(units, limit):
+    """Units closer than CROP_JOIN px joined while the rectangle holding both stays within `limit` px."""
+    d = CROP_JOIN // 2
+    joined = True
+    while joined:
+        joined = False
+        for i in range(len(units)):
+            for j in range(i + 1, len(units)):
+                a, b = units[i]['rect'], units[j]['rect']
+                x0, y0 = min(a[0], b[0]), min(a[1], b[1])
+                x1, y1 = max(a[0] + a[2], b[0] + b[2]), max(a[1] + a[3], b[1] + b[3])
+                near = (a[0] - d < b[0] + b[2] + d and b[0] - d < a[0] + a[2] + d
+                        and a[1] - d < b[1] + b[3] + d and b[1] - d < a[1] + a[3] + d)
+                if near and (x1 - x0) * (y1 - y0) <= limit:
+                    units[i]['rect'] = [x0, y0, x1 - x0, y1 - y0]
+                    units[i]['events'] += units[j]['events']
+                    del units[j]
+                    joined = True
+                    break
+            if joined:
+                break
+    return units
+
+
+def crop_units(events, width, height, samples):
+    """The screens of a recording and the crops of its changes, from the events of select_events: (screens, crops).
+
+    The events that settle in one sample are a moment. A moment whose changes, with CROP_JOIN / 2 px around each, cover
+    SCREEN_SHARE of the frame starts a screen: its full frame shows it and it gets no crops. The changes of any other
+    moment closer than CROP_JOIN px share a crop while it stays within CROP_SHARE of the frame; once the crops since the
+    screen's full frame cover SCREEN_SHARE of it, the next sample starts a screen. A screen without crops that lasts
+    under a second is a transition, such as a step of a scroll, and is dropped.
+    """
+    full = width * height
+    d = CROP_JOIN // 2
+    moments = {}
+    for i, e in enumerate(events):
+        moments.setdefault(e['settled'], []).append(i)
+    screens = [{'start': 0, 'key': 0, 'crops': []}]
+    cells = set()
+    for k in sorted(moments):
+        ids = moments[k]
+        near = [(max(0, events[i]['x'] - d), max(0, events[i]['y'] - d),
+                 min(width, events[i]['x'] + events[i]['w'] + d) - max(0, events[i]['x'] - d),
+                 min(height, events[i]['y'] + events[i]['h'] + d) - max(0, events[i]['y'] - d)) for i in ids]
+        if len(_cells(near)) * CELL * CELL > SCREEN_SHARE * full:
+            if screens[-1]['start'] != k:
+                screens.append({'start': k, 'key': k, 'crops': []})
+            cells = set()
+            continue
+        got = _join([{'rect': [events[i]['x'], events[i]['y'], events[i]['w'], events[i]['h']], 'events': [i]}
+                     for i in ids], CROP_SHARE * full)
+        screens[-1]['crops'] += sorted(got, key=lambda u: (u['rect'][1], u['rect'][0]))
+        cells |= _cells([u['rect'] for u in got])
+        if len(cells) * CELL * CELL > SCREEN_SHARE * full:
+            screens.append({'start': k + 1, 'key': k, 'crops': []})
+            cells = set()
+    ends = [s['start'] for s in screens[1:]] + [samples]
+    screens = [s for s, end in zip(screens, ends) if s['crops'] or end - s['start'] >= EVENT_FPS]
+    crops = []
+    for n, s in enumerate(screens, 1):
+        s['n'] = n
+        for u in s['crops']:
+            x, y, w, h = u['rect']
+            x0, y0 = max(0, x - CROP_MARGIN), max(0, y - CROP_MARGIN)
+            u['crop'] = [x0, y0, min(width, x + w + CROP_MARGIN) - x0, min(height, y + h + CROP_MARGIN) - y0]
+            u['start'] = min(events[i]['start'] for i in u['events'])
+            u['settled'] = events[u['events'][0]]['settled']
+            u['screen'] = n
+            crops.append(u)
+    return screens, crops
+
+
+def _looks_same(a, b):
+    """True when no 16x16 block of two pictures of one area has BOX_SPREAD px whose luma differs by more than PIXEL_T."""
+    blocks = {}
+    for y, (ra, rb) in enumerate(zip(a, b)):
+        if ra == rb:
+            continue
+        for i in range(0, len(ra), 3):
+            if abs(77 * (ra[i] - rb[i]) + 150 * (ra[i + 1] - rb[i + 1]) + 29 * (ra[i + 2] - rb[i + 2])) > 256 * PIXEL_T:
+                key = (i // 48, y // 16)
+                blocks[key] = blocks.get(key, 0) + 1
+                if blocks[key] >= BOX_SPREAD:
+                    return False
+    return True
+
+
+def _crop_block(c, fps, start):
+    """(width, rows of RGB bytes): a label over the crop's pictures before, in passing and after, side by side or,
+    when that is wider than a sheet, one under the other."""
+    x, y, w, h = c['crop']
+    times = [k for k in (c['before'], c.get('passing'), c['after']) if k is not None]
+    label = '%02d %s' % (c['n'], '>'.join('%.2f' % (start + k / fps) for k in times))
+    if c['tile'] is not None:
+        label += ' #%02d' % (c['tile'] + 1)
+    edge = bytes([150]) * 3
+    shots = [[edge * (w + 2)] + [edge + r + edge for r in c['pics'][k]] + [edge * (w + 2)] if k in c['pics']
+             else [bytes([235]) * (3 * (w + 2))] * (h + 2)
+             for k in [c['before']] + ([c['passing']] if c.get('passing') is not None else []) + [c['after']]]
+    fw, fh, gap = w + 2, h + 2, 24
+    if len(shots) * (fw + gap) - gap <= SHEET_WIDTH:
+        arrow = [bytearray(b'\xff' * 3 * gap) for _ in range(fh)]
+        for i in range(8):
+            for r in range(fh // 2 - (7 - i) // 2, fh // 2 + (7 - i) // 2 + 1):
+                arrow[r][3 * (8 + i):3 * (9 + i)] = b'\x5a' * 3
+        body = [b''.join(s[r] + (bytes(arrow[r]) if i < len(shots) - 1 else b'') for i, s in enumerate(shots))
+                for r in range(fh)]
+    else:
+        body = [r for i, s in enumerate(shots) for r in s + ([b'\xff' * 3 * fw] * 6 if i < len(shots) - 1 else [])]
+    bw = max(len(body[0]) // 3, 12 * len(label) + 8)
+    band = label_band(label, bw)[-bw * LABEL_H:]
+    return bw, [bytes(b for v in band[r * bw:(r + 1) * bw] for b in (v, v, v)) for r in range(LABEL_H)] + \
+        [r + b'\xff' * (3 * bw - len(r)) for r in body]
+
+
+def _pages(blocks, gap=12):
+    """Blocks (width, rows) packed in order into shelves at most SHEET_WIDTH wide and pages of at most 1.15 megapixels,
+    the size a vision model reads without shrinking; each page as (width, height, rows, indices of its blocks)."""
+    pages, shelves, shelf, sw, sh, height = [], [], [], 0, 0, 0
+
+    def page(shelves):
+        pw = max(sum(blocks[i][0] for i in s) + gap * (len(s) - 1) for s in shelves)
+        rows = []
+        for s in shelves:
+            for r in range(max(len(blocks[i][1]) for i in s)):
+                line = (b'\xff' * 3 * gap).join(blocks[i][1][r] if r < len(blocks[i][1]) else b'\xff' * 3 * blocks[i][0]
+                                                 for i in s)
+                rows.append(line + b'\xff' * (3 * pw - len(line)))
+            rows += [b'\xff' * 3 * pw] * gap
+        return pw, len(rows) - gap, rows[:-gap], [i for s in shelves for i in s]
+
+    for i, (bw, br) in enumerate(blocks):
+        if shelf and sw + gap + bw > SHEET_WIDTH:
+            shelves.append(shelf)
+            height += sh + gap
+            shelf, sw, sh = [], 0, 0
+        if shelves and (height + max(sh, len(br))) * SHEET_WIDTH > 1150000:
+            pages.append(page(shelves))
+            shelves, height = [], 0
+        shelf.append(i)
+        sw = sw + gap + bw if shelf[1:] else bw
+        sh = max(sh, len(br))
+    if shelf:
+        shelves.append(shelf)
+    if shelves:
+        pages.append(page(shelves))
+    return pages
+
+
+def write_crops(path, out_dir, screens, crops, tiles, width, height, fps=EVENT_FPS, start=0.0, length=None):
+    """Cut each crop of crop_units before and after its change at native size, and each screen's full frame, in one
+    pass over the samples of change_grids; write crops-NN.png per screen, screen-NN-<time>s.jpg and crops.json.
+
+    `tiles` maps an event's index to the kept frame (from 0) whose box it got. A crop whose before and after look the
+    same (_looks_same) shows the first sample in between that does not, and is left out when there is none. Returns
+    the crops written, numbered from 1, the images and the number left out, or None when no sample was decoded.
+    """
+    need = {}
+    for c in crops:
+        c['before'] = c['start'] - 1 if c['start'] > 0 else None
+        c['after'] = c['settled']
+        c['pics'] = {}
+        c['tile'] = min((tiles[i] for i in c['events'] if i in tiles), default=None)
+        for k in ([] if c['before'] is None else [c['before']]) + list(range(c['start'], c['settled'] + 1)):
+            need.setdefault(k, []).append(c)
+    keys = {}
+    for s in screens:
+        keys.setdefault(s['key'], []).append(s)
+    span = [] if length is None else ['-t', '%.3f' % length]
+    version = ffmpeg_version()
+    size = width * height * 3
+    last = max(list(need) + list(keys), default=-1)
+    got = 0
+    p = subprocess.Popen([ffmpeg(), '-v', 'error', '-ss', '%.3f' % start] + span + ['-i', path, '-vf',
+                          (_SAMPLES + ',scale=%d:%d,format=rgb24') % (fps, width, height),
+                          passthrough(version), 'passthrough', '-f', 'rawvideo', '-'],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        while got <= last:
+            frame = p.stdout.read(size)
+            if len(frame) < size:
+                break
+            for c in need.get(got, []):
+                x, y, w, h = c['crop']
+                c['pics'][got] = [frame[3 * ((y + r) * width + x):3 * ((y + r) * width + x + w)] for r in range(h)]
+            for s in keys.get(got, []):
+                s['file'] = 'screen-%02d-%.2fs.jpg' % (s['n'], start + got / fps)
+                subprocess.run([ffmpeg(), '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s',
+                                '%dx%d' % (width, height), '-i', '-', '-q:v', '2', os.path.join(out_dir, s['file'])],
+                               input=frame, capture_output=True, check=True)
+            got += 1
+    finally:
+        p.stdout.close()
+        p.kill()
+        p.wait()
+    if not got:
+        return None
+    kept, left = [], []
+    for c in crops:
+        before, after = c['pics'].get(c['before']), c['pics'].get(c['after'])
+        if after is None:
+            continue
+        if before is not None and _looks_same(before, after):
+            c['passing'] = next((k for k in range(c['start'], c['settled'])
+                                 if k in c['pics'] and not _looks_same(before, c['pics'][k])), None)
+            if c['passing'] is None:
+                left.append(c)
+                continue
+        kept.append(c)
+    for n, c in enumerate(kept, 1):
+        c['n'] = n
+    images = []
+    for s in screens:
+        s['images'] = []
+        mine = [c for c in kept if c['screen'] == s['n']]
+        for p_, (w, h, rows, ids) in enumerate(_pages([_crop_block(c, fps, start) for c in mine])):
+            name = 'crops-%02d%s.png' % (s['n'], chr(ord('a') + p_) if p_ else '')
+            subprocess.run([ffmpeg(), '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '%dx%d' % (w, h),
+                            '-i', '-', os.path.join(out_dir, name)], input=b''.join(rows), capture_output=True,
+                           check=True)
+            s['images'].append(name)
+            images.append(name)
+            for i in ids:
+                mine[i]['file'] = name
+
+    def cut(k, crop, name):
+        x, y, w, h = crop
+        return shlex.join([ffmpeg(), '-ss', '%.3f' % start] + span + [
+            '-i', path, '-vf', (_SAMPLES + ',select=eq(n\\,%d),crop=%d:%d:%d:%d') % (fps, k, w, h, x, y),
+            passthrough(version), 'passthrough', '-frames:v', '1', os.path.join(out_dir, name)])
+
+    t = lambda k: None if k is None else start + k / fps
+    write_json(os.path.join(out_dir, 'crops.json'), {
+        'screens': [{'n': s['n'], 'from': t(s['start']), 'full_frame': s.get('file'), 'crops': s['images']}
+                    for s in screens],
+        'crops': [{'n': c['n'], 'screen': c['screen'], 'tile': None if c['tile'] is None else c['tile'] + 1,
+                   'file': c['file'], 'before': t(c['before']), 'passing': t(c.get('passing')), 'after': t(c['after']),
+                   'region': c['rect'], 'crop': c['crop'],
+                   'recrop_before': None if c['before'] is None else
+                   cut(c['before'], c['crop'], 'crop-%02d-before.png' % c['n']),
+                   'recrop_after': cut(c['after'], c['crop'], 'crop-%02d-after.png' % c['n'])} for c in kept],
+        'left_out': [{'before': t(c['before']), 'after': t(c['after']), 'region': c['rect']} for c in left],
+    })
+    return {'crops': kept, 'images': images, 'screens': [s for s in screens if s.get('file')], 'left': len(left)}
 
 
 def _run_events(args, out_dir, start, end, ranged, duration, width, height):
@@ -1000,19 +1294,42 @@ def _run_events(args, out_dir, start, end, ranged, duration, width, height):
         paths = save_samples(args.video, points, times, out_dir, tile_width, EVENT_FPS, start, length)
         stage = 'sheets'
         sheets = []
+        cut = None
         if len(paths) > 1:
             changes = kept_changes(args.video, points, width, height, EVENT_FPS, start, length)
             regions = [[] for _ in points]
-            for e in events:
+            tiles = {}
+            for j, e in enumerate(events):
                 for i in range(max(1, bisect.bisect_left(points, e['start'])), len(points)):
                     if points[i] > e['until']:
                         break
                     if _visible(e, changes[i], gw):
                         regions[i].append([e['x'], e['y'], e['w'], e['h']])
+                        tiles[j] = i
                         break
             tile_height = (tile_width * height + width // 2) // width
             boxes = [change_boxes(r, width, tile_width, tile_height) for r in regions]
-            sheets = contact_sheets(paths, out_dir, cols, rows, boxes)
+            stage = 'crops'
+            screens, crops = crop_units(events, width, height, len(samples))
+            try:
+                cut = write_crops(args.video, out_dir, screens, crops, tiles, width, height, EVENT_FPS, start, length)
+            except (subprocess.CalledProcessError, OSError) as e:
+                print('  crops not written: %s' % e, file=sys.stderr)
+            marks = [[] for _ in points]
+            for c in (cut or {}).get('crops', []):
+                if c['tile'] is not None:
+                    x, y, w, h = c['rect']
+                    pad = BOX_GAP + BOX_T
+                    x0, y0 = x * tile_width // width - pad, y * tile_width // width - pad
+                    y1 = -(-(y + h) * tile_width // width) + pad
+                    text = '%02d' % c['n']
+                    marks[c['tile']].append((max(0, min(tile_width - 12 * len(text) - 2, x0)),
+                                             y0 - 18 if y0 >= 18 else min(tile_height - 18, y1), text))
+            stage = 'sheets'
+            if any(marks):
+                sheets = contact_sheets(paths, out_dir, cols, rows, boxes, marks)
+            else:
+                sheets = contact_sheets(paths, out_dir, cols, rows, boxes)
         stage = 'version'
         version = ffmpeg_version()
     except ValueError as e:
@@ -1069,6 +1386,11 @@ def _run_events(args, out_dir, start, end, ranged, duration, width, height):
         print('  %d contact sheets are more than 4; consider --max-frames or --from/--to' % len(sheets))
     print('  manifest: %s. Sheets are for meaning; read digits from the native frame, '
           'see "recheck" in the manifest.' % manifest_path)
+    if cut:
+        print('  crops: %d changes at native size, before > after, numbered as on the sheets: %s; the full frame of '
+              'each of %d screens: screen-*.jpg; all listed in %s'
+              % (len(cut['crops']), ', '.join(os.path.join(out_dir, f) for f in cut['images']) or 'none',
+                 len(cut['screens']), os.path.join(out_dir, 'crops.json')))
     return 0
 
 
