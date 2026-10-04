@@ -912,10 +912,23 @@ def mark_image(width, height, marks):
     return b'P7\nWIDTH %d\nHEIGHT %d\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n' % (width, height) + bytes(px)
 
 
-def box_marks(boxes, numbers, width, height):
+def _busy(grid, width, x, y, w, h):
+    """How many cells under a place on a tile `width` px wide have a mean off the middle one of those cells by more
+    than HOLD_DELTA: what is drawn there."""
+    means, gw, native = grid
+    x0, x1 = x * native // width, -(-(x + w) * native // width)
+    y0, y1 = y * native // width, -(-(y + h) * native // width)
+    under = [means[r * gw + c] for r in range(y0 // CELL, min(len(means) // gw, (y1 - 1) // CELL + 1))
+             for c in range(x0 // CELL, min(gw, (x1 - 1) // CELL + 1))]
+    middle = sorted(under)[(len(under) - 1) // 2] if under else 0
+    return sum(abs(v - middle) > HOLD_DELTA for v in under)
+
+
+def box_marks(boxes, numbers, width, height, grid=None):
     """The marks [(x, y, text)] of the `boxes` of a tile `width` x `height`, one per box that has `numbers`: its crops
     as `03`, or `01-06` for a run, above, under, right or left of the box, the first of these that lies on the tile
-    and covers no box and no mark placed before. A box with no such place gets no mark."""
+    and covers no box and no mark placed before. With `grid`, the cell means of the frame, their row length and the
+    frame's width, it is the one of these where the least is drawn. A box with no such place gets no mark."""
     marks, taken = [], list(boxes)
     for (bx, by, bw, bh), ns in zip(boxes, numbers):
         runs = []
@@ -929,12 +942,13 @@ def box_marks(boxes, numbers, width, height):
         text = ' '.join('%02d' % a if a == b else '%02d-%02d' % (a, b) for a, b in runs)
         mw, mh = 12 * len(text) + 2, 18
         cx, cy = max(0, min(width - mw, bx)), max(0, min(height - mh, by))
-        for x, y in ((cx, by - mh), (cx, by + bh), (bx + bw, cy), (bx - mw, cy)):
-            if 0 <= x <= width - mw and 0 <= y <= height - mh and not any(
-                    x < ox + ow and ox < x + mw and y < oy + oh and oy < y + mh for ox, oy, ow, oh in taken):
-                marks.append((x, y, text))
-                taken.append((x, y, mw, mh))
-                break
+        free = [(x, y) for x, y in ((cx, by - mh), (cx, by + bh), (bx + bw, cy), (bx - mw, cy))
+                if 0 <= x <= width - mw and 0 <= y <= height - mh and not any(
+                    x < ox + ow and ox < x + mw and y < oy + oh and oy < y + mh for ox, oy, ow, oh in taken)]
+        if free:
+            x, y = min(free, key=lambda p: _busy(grid, width, p[0], p[1], mw, mh)) if grid else free[0]
+            marks.append((x, y, text))
+            taken.append((x, y, mw, mh))
     return marks
 
 
@@ -1382,7 +1396,7 @@ def _run_events(args, out_dir, start, end, ranged, duration, width, height):
                               and by <= events[j]['y'] * tile_width // width - BOX_GAP - BOX_T < by + bh}
                     numbers.append(sorted(inside - done))
                     done |= inside
-                marks.append(box_marks(on, numbers, tile_width, tile_height))
+                marks.append(box_marks(on, numbers, tile_width, tile_height, (samples[points[i]][0], gw, width)))
             if any(marks):
                 sheets = contact_sheets(paths, out_dir, cols, rows, boxes, marks)
             else:

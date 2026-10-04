@@ -47,7 +47,7 @@ def blobs(change, gw, gh, cell=8)
     """Changed areas of one sample in native pixels, or one blob for the whole frame when most of it changed."""
 def block_max(a, b, bs=8)
     """Largest mean difference over the bs x bs blocks of two thumbnails."""
-def box_marks(boxes, numbers, width, height)
+def box_marks(boxes, numbers, width, height, grid=None)
     """The marks [(x, y, text)] of the `boxes` of a tile `width` x `height`, one per box that has `numbers`: its crops"""
 def change_boxes(regions, native_width, width, height)
     """Boxes to draw around `regions` on a tile: scaled, padded, joined when close, dropped when they cover the tile."""

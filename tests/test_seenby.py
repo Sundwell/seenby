@@ -7413,3 +7413,235 @@ def test_crp_14_main_refuses_a_folder_with_foreign_crops_and_leaves_them(monkeyp
     assert run.err == "out already holds crops-*.png from something else; pass --force to overwrite\n"
     assert run.probe_calls == []
     assert os.listdir("out") == ["crops-of-wheat.png"]
+
+
+# -------- CRP-17 (box_marks takes the free place with the fewest busy cells), CRP-18 (main() gives every frame its grid)
+
+TILE_C = (60, 30, 20, 20)
+
+
+def ink(x0, y0, w, h, v):
+    return grid(box(x0, y0, w, h, v))
+
+
+def ink_marks(g, native_width=160):
+    return seenby.box_marks([TILE_C], [[7]], 160, 80, (g, 20, native_width))
+
+
+def raised_grid(background, cells):
+    plane = bytearray([background]) * (GW * GH)
+    for (x, y), v in cells.items():
+        plane[y * GW + x] = v
+    return bytes(plane)
+
+
+@pytest.mark.spec("CRP-17")
+@pytest.mark.parametrize("via", ["empty-grid", "none", "four-arguments", "none-by-keyword"])
+def test_crp_17_an_empty_frame_or_no_grid_gives_the_place_of_crp_11(via):
+    if via == "empty-grid":
+        marks = ink_marks(grid({}))
+    elif via == "none":
+        marks = seenby.box_marks([TILE_C], [[7]], 160, 80, None)
+    elif via == "four-arguments":
+        marks = seenby.box_marks([TILE_C], [[7]], 160, 80)
+    else:
+        marks = seenby.box_marks([TILE_C], [[7]], 160, 80, grid=None)
+    assert marks == [(60, 12, "07")]
+
+
+@pytest.mark.spec("CRP-17")
+@pytest.mark.parametrize("kind", [bytes, memoryview, bytearray], ids=["bytes", "memoryview", "bytearray"])
+def test_crp_17_the_means_may_be_bytes_or_a_memoryview(kind):
+    assert ink_marks(kind(ink(8, 1, 2, 2, 100))) == [(60, 50, "07")]
+
+
+@pytest.mark.spec("CRP-17")
+@pytest.mark.parametrize(
+    "cells, expected",
+    [
+        (box(8, 1, 2, 2, 100) | box(8, 7, 1, 1, 100), (80, 30)),
+        (box(8, 1, 2, 2, 100) | box(7, 7, 3, 1, 100) | box(11, 4, 2, 1, 100) | box(5, 4, 1, 1, 100), (34, 30)),
+        (box(8, 1, 2, 1, 100) | box(8, 7, 2, 1, 100) | box(11, 4, 3, 1, 100) | box(5, 4, 3, 1, 100), (60, 12)),
+        (box(0, 0, 20, 4, 100) | box(8, 7, 1, 1, 100), (60, 12)),
+        (box(0, 0, 20, 2, 100) | box(8, 7, 1, 1, 100), (80, 30)),
+        (box(7, 1, 4, 2, 100) | box(8, 7, 1, 1, 100), (80, 30)),
+    ],
+    ids=[
+        "right-has-none", "left-has-the-fewest", "tie-goes-to-the-first-in-order", "even-panel-above-is-empty",
+        "panel-edge-above-is-busy", "middle-is-the-majority-so-the-minority-is-busy",
+    ],
+)
+def test_crp_17_the_place_with_the_fewest_busy_cells_wins_and_a_tie_goes_to_the_first(cells, expected):
+    assert ink_marks(grid(cells)) == [(*expected, "07")]
+
+
+@pytest.mark.spec("CRP-17")
+@pytest.mark.parametrize(
+    "level, expected",
+    [(6, (60, 12)), (7, (60, 50))],
+    ids=["6-levels-is-not-busy", "7-levels-is-busy"],
+)
+def test_crp_17_a_cell_is_busy_only_when_it_differs_from_the_middle_by_more_than_6(level, expected):
+    assert ink_marks(ink(8, 1, 2, 2, level)) == [(*expected, "07")]
+
+
+@pytest.mark.spec("CRP-17")
+@pytest.mark.parametrize(
+    "level, expected",
+    [(194, (60, 12)), (193, (60, 50))],
+    ids=["6-darker-is-not-busy", "7-darker-is-busy"],
+)
+def test_crp_17_a_darker_cell_counts_as_a_lighter_one_does(level, expected):
+    assert ink_marks(raised_grid(200, box(8, 1, 2, 2, level))) == [(*expected, "07")]
+
+
+@pytest.mark.spec("CRP-17")
+@pytest.mark.parametrize(
+    "x, expected",
+    [(13, (30, 22)), (14, (30, 2))],
+    ids=["column-13-is-in-the-place-above", "column-14-is-not"],
+)
+def test_crp_17_the_cells_of_a_place_follow_the_scale_of_the_tile_to_the_frame(x, expected):
+    marks = seenby.box_marks([(30, 20, 10, 2)], [[7]], 80, 40, (ink(x, 4, 1, 1, 100), 20, 160))
+    assert marks == [(*expected, "07")]
+
+
+@pytest.mark.spec("CRP-17")
+def test_crp_17_cells_past_the_right_edge_of_the_grid_are_not_busy_and_not_counted():
+    g = grid(box(19, 2, 1, 1, 100) | box(18, 7, 1, 1, 100) | box(16, 4, 1, 1, 100))
+    assert seenby.box_marks([(150, 30, 20, 20)], [[7]], 320, 80, (g, 20, 320)) == [(170, 30, "07")]
+
+
+@pytest.mark.spec("CRP-17")
+def test_crp_17_cells_past_the_bottom_row_of_the_grid_are_not_busy_and_not_counted():
+    g = grid(box(8, 6, 1, 1, 100) | box(11, 8, 1, 1, 100) | box(6, 8, 1, 1, 100))
+    assert seenby.box_marks([(60, 60, 20, 20)], [[7]], 160, 160, (g, 20, 160)) == [(60, 80, "07")]
+
+
+@pytest.mark.spec("CRP-17")
+@pytest.mark.parametrize(
+    "g, expected",
+    [
+        (ink(10, 4, 2, 1, 100), (34, 30)),
+        (grid(box(10, 4, 1, 1, 100) | box(5, 4, 2, 1, 100)), (80, 30)),
+    ],
+    ids=["right-has-two-left-none", "right-has-one-left-two"],
+)
+def test_crp_17_neighbouring_boxes_stay_in_the_way_and_the_places_left_are_compared(g, expected):
+    boxes = [(60, 10, 20, 20), (60, 30, 20, 20), (60, 50, 20, 20)]
+    assert seenby.box_marks(boxes, [[], [2], []], 160, 80, (g, 20, 160)) == [(*expected, "02")]
+
+
+@pytest.mark.spec("CRP-17")
+def test_crp_17_a_place_taken_by_an_earlier_mark_is_not_free_with_a_grid_either():
+    boxes = [(60, 30, 20, 20), (90, 30, 20, 20)]
+    marks = seenby.box_marks(boxes, [[1], [2]], 160, 80, (ink(7, 1, 7, 2, 100), 20, 160))
+    assert marks == [(60, 50, "01"), (90, 50, "02")]
+
+
+@pytest.mark.spec("CRP-17")
+@pytest.mark.parametrize(
+    "numbers, expected",
+    [([[1, 2, 3, 4, 5, 6]], [(60, 50, "01-06")]), ([[]], [])],
+    ids=["a-run-of-six-under-the-box", "no-numbers-no-mark"],
+)
+def test_crp_17_the_text_of_a_mark_and_a_box_without_numbers_are_as_in_crp_11(numbers, expected):
+    assert seenby.box_marks([TILE_C], numbers, 160, 80, (ink(8, 1, 2, 2, 100), 20, 160)) == expected
+
+
+@pytest.mark.spec("CRP-17")
+def test_crp_17_a_box_with_no_free_place_has_no_mark_with_a_grid_as_without():
+    boxes = [(2, 2, 23, 23), (41, 2, 23, 23)]
+    assert seenby.box_marks(boxes, [[1], [2]], 776, 39, (grid({}), 20, 1600)) == [(64, 2, "02")]
+
+
+@pytest.mark.spec("CRP-17")
+@pytest.mark.parametrize(
+    "boxes, numbers, width, height",
+    [
+        ([BOX_B], [[1, 2, 3, 4, 5, 6]], 776, 400),
+        ([(100, 18, 30, 30)], [[7]], 776, 400),
+        ([(770, 100, 30, 30)], [[7]], 776, 400),
+        ([(-5, -5, 34, 34)], [[7]], 776, 400),
+        (THREE_BOXES, [[1], [2], [3]], 776, 400),
+        ([(100, 100, 10, 10), (120, 100, 10, 10), (140, 100, 10, 10)], [[1], [2], [3]], 776, 400),
+        ([(2, 2, 23, 23), (41, 2, 23, 23)], [[1], [2]], 776, 39),
+        ([(0, 20, 10, 10)], [[1, 3, 5]], 90, 100),
+    ],
+    ids=["above", "just-room-above", "past-right", "past-corner", "three-in-a-column", "three-in-a-row", "no-place", "too-wide"],
+)
+def test_crp_17_a_none_grid_gives_the_result_of_four_arguments_on_the_crp_11_rows(boxes, numbers, width, height):
+    assert seenby.box_marks(boxes, numbers, width, height, None) == seenby.box_marks(boxes, numbers, width, height)
+
+
+INKED_MARK_SAMPLE = ink(2, 6, 2, 1, 90)
+
+
+def inked_samples():
+    return [(INKED_MARK_SAMPLE, change) for _, change in events_two()]
+
+
+def late_samples():
+    samples = events_two()
+    samples[-1] = (INKED_MARK_SAMPLE, samples[-1][1])
+    return samples
+
+
+@pytest.mark.spec("CRP-18")
+@pytest.mark.parametrize(
+    "samples, expected",
+    [
+        (events_two, [[], [(11, 45, "01"), (91, 45, "02")], [(11, 45, "03")]]),
+        (inked_samples, [[], [(45, 11, "01"), (91, 45, "02")], [(45, 11, "03")]]),
+        (late_samples, [[], [(11, 45, "01"), (91, 45, "02")], [(45, 11, "03")]]),
+    ],
+    ids=["equal-means-give-the-marks-of-crp-13", "every-sample-inked", "only-the-last-sample-inked"],
+)
+def test_crp_18_each_frame_is_judged_by_the_means_of_its_own_sample(monkeypatch, capsys, tmp_path, samples, expected):
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(4),
+        probe=EVENTS_PROBE, samples=samples(), changes=TWO_CHANGES, crops=result_r(),
+    )
+    assert run.rc == 0
+    assert run.contact_sheets_boxes == [TWO_BOXES]
+    assert run.contact_sheets_arity == [6]
+    assert run.contact_sheets_marks == [expected]
+
+
+@pytest.mark.spec("CRP-17")
+@pytest.mark.parametrize(
+    "height, g, expected",
+    [
+        (388, ink(10, 2, 1, 1, 100), (13, 22)),
+        (388, ink(11, 2, 1, 1, 100), (13, 2)),
+        (54, ink(4, 9, 1, 1, 100), (23, 35)),
+        (54, ink(4, 3, 1, 1, 100), (13, 17)),
+    ],
+    ids=["last-column-rounded-up-is-busy", "column-past-it-is-not", "last-row-rounded-up-is-busy", "row-past-it-is-not"],
+)
+def test_crp_17_the_last_column_and_row_of_a_place_are_rounded_up_at_a_ratio_that_is_not_whole(height, g, expected):
+    y = 20 if height == 388 else 35
+    assert seenby.box_marks([(13, y, 10, 2)], [[7]], 776, height, (g, 20, 1600)) == [(*expected, "07")]
+
+
+@pytest.mark.spec("CRP-18")
+@pytest.mark.parametrize(
+    "cell, expected",
+    [
+        ((12, 7), [[], [(2, 25, "01"), (64, 2, "02")], [(2, 25, "03")]]),
+        ((6, 4), [[], [(2, 25, "01"), (41, 25, "02")], [(2, 25, "03")]]),
+    ],
+    ids=["cell-under-the-second-place", "cell-under-no-place-at-the-analysed-width"],
+)
+def test_crp_18_the_analysed_width_is_the_native_width_of_the_grid_on_a_narrow_tile(
+    monkeypatch, capsys, tmp_path, cell, expected
+):
+    mark = ink(cell[0], cell[1], 1, 1, 90)
+    samples = [(mark, change) for _, change in events_two()]
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(4),
+        probe=(2.0, 1600, 800), samples=samples, changes=TWO_CHANGES, crops=result_r(),
+    )
+    assert run.rc == 0
+    assert run.contact_sheets_boxes == [[[], [(2, 2, 23, 23), (41, 2, 23, 23)], [(2, 2, 23, 23)]]]
+    assert run.contact_sheets_marks == [expected]
