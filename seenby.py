@@ -94,6 +94,7 @@ _GLYPHS = {
     '8': '01110 10001 10001 01110 10001 10001 01110', '9': '01110 10001 10001 01111 00001 00010 01100',
     '#': '01010 01010 11111 01010 11111 01010 01010', '.': '00000 00000 00000 00000 00000 01100 01100',
     's': '00000 00000 01110 10000 01110 00001 11110', '>': '10000 01000 00100 00010 00100 01000 10000',
+    '-': '00000 00000 00000 11111 00000 00000 00000',
 }
 _ACTIVE = bytes(1 if v >= MIN_CELL else 0 for v in range(256))
 
@@ -769,12 +770,16 @@ def clean(out_dir):
 
 
 def check_out_dir(out_dir, force):
-    """None when the directory is ours to clean, otherwise the refusal to print."""
+    """None when the directory is ours to clean, otherwise the refusal to print: clean() would remove files with
+    our names that something else put there."""
     if force or not os.path.isdir(out_dir):
         return None
     names = os.listdir(out_dir)
-    if 'frames.json' not in names and any(n.startswith('frame-') and n.endswith('.jpg') for n in names):
-        return '%s already holds frame-*.jpg from something else; pass --force to overwrite' % out_dir
+    if 'frames.json' in names:
+        return None
+    for head, tail in (('frame-', '.jpg'), ('screen-', '.jpg'), ('crops-', '.png')):
+        if any(n.startswith(head) and n.endswith(tail) for n in names):
+            return '%s already holds %s*%s from something else; pass --force to overwrite' % (out_dir, head, tail)
     return None
 
 
@@ -907,6 +912,32 @@ def mark_image(width, height, marks):
     return b'P7\nWIDTH %d\nHEIGHT %d\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n' % (width, height) + bytes(px)
 
 
+def box_marks(boxes, numbers, width, height):
+    """The marks [(x, y, text)] of the `boxes` of a tile `width` x `height`, one per box that has `numbers`: its crops
+    as `03`, or `01-06` for a run, above, under, right or left of the box, the first of these that lies on the tile
+    and covers no box and no mark placed before. A box with no such place gets no mark."""
+    marks, taken = [], list(boxes)
+    for (bx, by, bw, bh), ns in zip(boxes, numbers):
+        runs = []
+        for n in sorted(set(ns)):
+            if runs and n == runs[-1][1] + 1:
+                runs[-1][1] = n
+            else:
+                runs.append([n, n])
+        if not runs:
+            continue
+        text = ' '.join('%02d' % a if a == b else '%02d-%02d' % (a, b) for a, b in runs)
+        mw, mh = 12 * len(text) + 2, 18
+        cx, cy = max(0, min(width - mw, bx)), max(0, min(height - mh, by))
+        for x, y in ((cx, by - mh), (cx, by + bh), (bx + bw, cy), (bx - mw, cy)):
+            if 0 <= x <= width - mw and 0 <= y <= height - mh and not any(
+                    x < ox + ow and ox < x + mw and y < oy + oh and oy < y + mh for ox, oy, ow, oh in taken):
+                marks.append((x, y, text))
+                taken.append((x, y, mw, mh))
+                break
+    return marks
+
+
 def contact_sheets(paths, out_dir, cols, rows, boxes=None, marks=None):
     """Tile frames into `cols x rows` images, each frame under a band with its number and time, its `boxes` drawn on it,
     its `marks` [(x, y, text)] written next to them.
@@ -919,16 +950,11 @@ def contact_sheets(paths, out_dir, cols, rows, boxes=None, marks=None):
     if not paths:
         return []
     probed = subprocess.run([ffprobe(), '-v', 'error', '-select_streams', 'v:0', '-show_entries',
-                             'stream=width,pix_fmt', '-of', 'csv=p=0', paths[0]],
+                             'stream=width,height,pix_fmt', '-of', 'csv=p=0', paths[0]],
                             capture_output=True, text=True, check=True).stdout.strip().split(',')
-    if len(probed) != 2 or not probed[0].isdigit():
+    if len(probed) != 3 or not probed[0].isdigit() or not probed[1].isdigit():
         raise ValueError('ffprobe could not read the frame width of %s' % paths[0])
-    width, fmt = int(probed[0]), probed[1]
-    tile_height = 0
-    if marks and any(marks):
-        tile_height = int(subprocess.run([ffprobe(), '-v', 'error', '-select_streams', 'v:0', '-show_entries',
-                                          'stream=height', '-of', 'csv=p=0', paths[0]],
-                                         capture_output=True, text=True, check=True).stdout.split()[0])
+    width, tile_height, fmt = int(probed[0]), int(probed[1]), probed[2]
     per_sheet = cols * rows
     sheets = []
     for n, start in enumerate(range(0, len(paths), per_sheet), 1):
@@ -949,17 +975,17 @@ def contact_sheets(paths, out_dir, cols, rows, boxes=None, marks=None):
             here = min(cols, len(batch))
             draw = ''.join(",drawbox=x=%d:y=%d:w=%d:h=%d:color=0xff00ff:t=%d:enable='eq(n,%d)'" % (x, y, w, h, BOX_T, i)
                            for i, frame in enumerate((boxes or [])[start:start + per_sheet]) for x, y, w, h in frame)
+            here_marks = [(MARGIN + (i % here) * (width + PADDING) + x,
+                           MARGIN + (i // here) * (tile_height + LABEL_H + PADDING) + LABEL_H + y, text)
+                          for i, frame in enumerate((marks or [])[start:start + per_sheet]) for x, y, text in frame]
             if len(draw) > 30000:
                 # the command line of Windows holds 32767 characters
-                draw = ''
+                draw, here_marks = '', []
             # concat gives the band images broken timestamps and vstack pairs by timestamp, so both are renumbered
             graph = ('[0:v]setpts=N,format=%s%s[f];[1:v]setpts=N,format=%s[b];[b][f]vstack=shortest=1,'
                      'tile=%dx%d:margin=%d:padding=%d'
                      % (fmt, draw, fmt, here, math.ceil(len(batch) / here), MARGIN, PADDING))
             extra = []
-            here_marks = [(MARGIN + (i % here) * (width + PADDING) + x,
-                           MARGIN + (i // here) * (tile_height + LABEL_H + PADDING) + LABEL_H + y, text)
-                          for i, frame in enumerate((marks or [])[start:start + per_sheet]) for x, y, text in frame]
             if here_marks:
                 # drawn by seenby into a transparent layer: drawtext needs a font, and a drawbox per pixel is too long
                 layer = os.path.join(tmp, 'marks.pam')
@@ -968,7 +994,9 @@ def contact_sheets(paths, out_dir, cols, rows, boxes=None, marks=None):
                                        2 * MARGIN + math.ceil(len(batch) / here) * (tile_height + LABEL_H + PADDING),
                                        here_marks))
                 extra = ['-i', layer]
-                graph += '[t];[t][2:v]overlay=0:0,format=%s' % fmt
+                # overlay works in 4:2:0 unless told: on a 4:4:4 sheet it would blur the colour of every tile
+                graph += '[t];[t][2:v]overlay=0:0:format=%s,format=%s' % (
+                    'yuv444' if '444' in fmt else 'yuv422' if '422' in fmt else 'yuv420', fmt)
             subprocess.run([ffmpeg(), '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', frames,
                             '-f', 'concat', '-safe', '0', '-i', bands] + extra + ['-filter_complex', graph,
                             '-frames:v', '1', sheet], check=True)
@@ -1012,7 +1040,7 @@ def crop_units(events, width, height, samples):
     SCREEN_SHARE of the frame starts a screen: its full frame shows it and it gets no crops. The changes of any other
     moment closer than CROP_JOIN px share a crop while it stays within CROP_SHARE of the frame; once the crops since the
     screen's full frame cover SCREEN_SHARE of it, the next sample starts a screen. A screen without crops that lasts
-    under a second is a transition, such as a step of a scroll, and is dropped.
+    under a second is a transition, such as a step of a scroll, and is dropped, unless the recording ends on it.
     """
     full = width * height
     d = CROP_JOIN // 2
@@ -1040,7 +1068,8 @@ def crop_units(events, width, height, samples):
             screens.append({'start': k + 1, 'key': k, 'crops': []})
             cells = set()
     ends = [s['start'] for s in screens[1:]] + [samples]
-    screens = [s for s, end in zip(screens, ends) if s['crops'] or end - s['start'] >= EVENT_FPS]
+    screens = [s for s, end in zip(screens, ends)
+               if s['crops'] or end - s['start'] >= EVENT_FPS or s is screens[-1] and s['start'] < samples]
     crops = []
     for n, s in enumerate(screens, 1):
         s['n'] = n
@@ -1055,17 +1084,23 @@ def crop_units(events, width, height, samples):
     return screens, crops
 
 
-def _looks_same(a, b):
-    """True when no 16x16 block of two pictures of one area has BOX_SPREAD px whose luma differs by more than PIXEL_T."""
-    blocks = {}
+def looks_same(a, b):
+    """True when no 16x16 block of two RGB pictures of one area has BOX_SPREAD px whose luma differs by more than
+    PIXEL_T, or BOX_STRONG px whose luma differs by more than twice that."""
+    spread, strong = {}, {}
     for y, (ra, rb) in enumerate(zip(a, b)):
         if ra == rb:
             continue
         for i in range(0, len(ra), 3):
-            if abs(77 * (ra[i] - rb[i]) + 150 * (ra[i + 1] - rb[i + 1]) + 29 * (ra[i + 2] - rb[i + 2])) > 256 * PIXEL_T:
+            r, g, c = ra[i] - rb[i], ra[i + 1] - rb[i + 1], ra[i + 2] - rb[i + 2]
+            # by BT.601 and by BT.709: the change was found on the recording's own luma, which is one of the two
+            d = max(abs(77 * r + 150 * g + 29 * c), abs(54 * r + 183 * g + 19 * c))
+            if d > 256 * PIXEL_T:
                 key = (i // 48, y // 16)
-                blocks[key] = blocks.get(key, 0) + 1
-                if blocks[key] >= BOX_SPREAD:
+                spread[key] = spread.get(key, 0) + 1
+                if d > 512 * PIXEL_T:
+                    strong[key] = strong.get(key, 0) + 1
+                if spread[key] >= BOX_SPREAD or strong.get(key, 0) >= BOX_STRONG:
                     return False
     return True
 
@@ -1100,7 +1135,8 @@ def _crop_block(c, fps, start):
 
 def _pages(blocks, gap=12):
     """Blocks (width, rows) packed in order into shelves at most SHEET_WIDTH wide and pages of at most 1.15 megapixels,
-    the size a vision model reads without shrinking; each page as (width, height, rows, indices of its blocks)."""
+    the size a vision model reads without shrinking; each page as (width, height, rows, indices of its blocks). A
+    block wider than SHEET_WIDTH is a page of its own, so that the model shrinks nothing else with it."""
     pages, shelves, shelf, sw, sh, height = [], [], [], 0, 0, 0
 
     def page(shelves):
@@ -1119,7 +1155,8 @@ def _pages(blocks, gap=12):
             shelves.append(shelf)
             height += sh + gap
             shelf, sw, sh = [], 0, 0
-        if shelves and (height + max(sh, len(br))) * SHEET_WIDTH > 1150000:
+        if shelves and ((height + max(sh, len(br))) * SHEET_WIDTH > 1150000
+                        or SHEET_WIDTH < max(bw, blocks[shelves[-1][0]][0])):
             pages.append(page(shelves))
             shelves, height = [], 0
         shelf.append(i)
@@ -1134,13 +1171,15 @@ def _pages(blocks, gap=12):
 
 def write_crops(path, out_dir, screens, crops, tiles, points, width, height, fps=EVENT_FPS, start=0.0, length=None):
     """Cut each crop of crop_units before and after its change at native size, and each screen's full frame, in one
-    pass over the samples of change_grids; write crops-NN.png per screen, screen-NN-<time>s.jpg and crops.json.
+    pass over the samples of change_grids; write crops-NN.png per screen (crops-NN-02.png its second page),
+    screen-NN-<time>s.jpg and crops.json.
 
     `tiles` maps an event's index to the kept frame (from 0) whose box it got, `points` holds the sample of each kept
-    frame. Between before and after a crop shows the frame its box is on when that differs from both (_looks_same);
-    a crop whose before and after look the same shows the first sample in between that does not, and is left out
-    when there is none. Returns the crops written, numbered from 1, the images and the number left out, or None when
-    no sample was decoded.
+    frame. Between before and after a crop shows the frame its box is on when that differs from both (looks_same);
+    a crop whose before and after look the same shows the first sample in between that differs from before or, when
+    that one looks like after, the first one past it that differs from before and from it, and is left out when
+    neither will do. Returns the crops written, numbered from 1, the images and the number left out, or None when no
+    sample was decoded.
     """
     need = {}
     for c in crops:
@@ -1148,6 +1187,9 @@ def write_crops(path, out_dir, screens, crops, tiles, points, width, height, fps
         c['after'] = c['settled']
         c['pics'] = {}
         c['tile'] = min((tiles[i] for i in c['events'] if i in tiles), default=None)
+        c['on_tile'] = points[c['tile']] if c['tile'] is not None and c['start'] <= points[c['tile']] < c['settled'] \
+            else None
+        c['seen'] = c['then'] = None
         for k in ([] if c['before'] is None else [c['before']]) + list(range(c['start'], c['settled'] + 1)):
             need.setdefault(k, []).append(c)
     keys = {}
@@ -1169,7 +1211,16 @@ def write_crops(path, out_dir, screens, crops, tiles, points, width, height, fps
                 break
             for c in need.get(got, []):
                 x, y, w, h = c['crop']
-                c['pics'][got] = [frame[3 * ((y + r) * width + x):3 * ((y + r) * width + x + w)] for r in range(h)]
+                pic = [frame[3 * ((y + r) * width + x):3 * ((y + r) * width + x + w)] for r in range(h)]
+                # only these five are kept: every sample of a change that lasts minutes is gigabytes
+                if c['then'] is None and c['before'] is not None and c['start'] <= got < c['settled'] \
+                        and not looks_same(c['pics'][c['before']], pic):
+                    if c['seen'] is None:
+                        c['seen'] = got
+                    elif not looks_same(c['pics'][c['seen']], pic):
+                        c['then'] = got
+                if got in (c['before'], c['after'], c['on_tile'], c['seen'], c['then']):
+                    c['pics'][got] = pic
             for s in keys.get(got, []):
                 s['file'] = 'screen-%02d-%.2fs.jpg' % (s['n'], start + got / fps)
                 subprocess.run([ffmpeg(), '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s',
@@ -1187,12 +1238,10 @@ def write_crops(path, out_dir, screens, crops, tiles, points, width, height, fps
         before, after = c['pics'].get(c['before']), c['pics'].get(c['after'])
         if after is None:
             continue
-        same = before is not None and _looks_same(before, after)
-        between = range(c['start'], c['settled'])
-        on_tile = [points[c['tile']]] if c['tile'] is not None and points[c['tile']] in between else []
-        c['passing'] = next((k for k in on_tile + (list(between) if same else [])
-                             if k in c['pics'] and not _looks_same(c['pics'][k], after)
-                             and (before is None or not _looks_same(before, c['pics'][k]))), None)
+        same = before is not None and looks_same(before, after)
+        c['passing'] = next((k for k in [c['on_tile']] + ([c['seen'], c['then']] if same else [])
+                             if k in c['pics'] and not looks_same(c['pics'][k], after)
+                             and (before is None or not looks_same(before, c['pics'][k]))), None)
         if same and c['passing'] is None:
             left.append(c)
             continue
@@ -1204,7 +1253,7 @@ def write_crops(path, out_dir, screens, crops, tiles, points, width, height, fps
         s['images'] = []
         mine = [c for c in kept if c['screen'] == s['n']]
         for p_, (w, h, rows, ids) in enumerate(_pages([_crop_block(c, fps, start) for c in mine])):
-            name = 'crops-%02d%s.png' % (s['n'], chr(ord('a') + p_) if p_ else '')
+            name = 'crops-%02d%s.png' % (s['n'], '-%02d' % (p_ + 1) if p_ else '')
             subprocess.run([ffmpeg(), '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '%dx%d' % (w, h),
                             '-i', '-', os.path.join(out_dir, name)], input=b''.join(rows), capture_output=True,
                            check=True)
@@ -1315,24 +1364,25 @@ def _run_events(args, out_dir, start, end, ranged, duration, width, height):
                         break
             tile_height = (tile_width * height + width // 2) // width
             boxes = [change_boxes(r, width, tile_width, tile_height) for r in regions]
-            stage = 'crops'
-            screens, crops = crop_units(events, width, height, len(samples))
+            # the crops are an addition: whatever fails in them, the sheets and the manifest are still written
             try:
+                screens, crops = crop_units(events, width, height, len(samples))
                 cut = write_crops(args.video, out_dir, screens, crops, tiles, points, width, height, EVENT_FPS, start,
                                   length)
-            except (subprocess.CalledProcessError, OSError) as e:
-                print('  crops not written: %s' % e, file=sys.stderr)
-            marks = [[] for _ in points]
-            for c in (cut or {}).get('crops', []):
-                if c['tile'] is not None:
-                    x, y, w, h = c['rect']
-                    pad = BOX_GAP + BOX_T
-                    x0, y0 = x * tile_width // width - pad, y * tile_width // width - pad
-                    y1 = -(-(y + h) * tile_width // width) + pad
-                    text = '%02d' % c['n']
-                    marks[c['tile']].append((max(0, min(tile_width - 12 * len(text) - 2, x0)),
-                                             y0 - 18 if y0 >= 18 else min(tile_height - 18, y1), text))
-            stage = 'sheets'
+            except Exception as e:
+                print('  crops not written: %s' % (str(e) or type(e).__name__), file=sys.stderr)
+            of = {j: c['n'] for c in (cut or {}).get('crops', []) for j in c['events']}
+            marks = []
+            for i, on in enumerate(boxes):
+                # a crop of several boxes is numbered at the first only: a number on each hid a row of column headers
+                numbers, done = [], set()
+                for bx, by, bw, bh in on:
+                    inside = {of[j] for j in of if tiles.get(j) == i
+                              and bx <= events[j]['x'] * tile_width // width - BOX_GAP - BOX_T < bx + bw
+                              and by <= events[j]['y'] * tile_width // width - BOX_GAP - BOX_T < by + bh}
+                    numbers.append(sorted(inside - done))
+                    done |= inside
+                marks.append(box_marks(on, numbers, tile_width, tile_height))
             if any(marks):
                 sheets = contact_sheets(paths, out_dir, cols, rows, boxes, marks)
             else:
@@ -1449,7 +1499,8 @@ def main():
     p.add_argument('--dry-run', action='store_true',
                    help='print the selected times and the layout, extract nothing')
     p.add_argument('--force', action='store_true',
-                   help='overwrite an output directory that holds frame-*.jpg from something else')
+                   help='overwrite an output directory that holds frame-*.jpg, screen-*.jpg or crops-*.png from '
+                        'something else')
     args = p.parse_args()
     legacy_only = any(v is not None for v in (args.threshold, args.max_gap, args.block_k, args.sample_fps))
     if args.selector == 'events' and legacy_only:

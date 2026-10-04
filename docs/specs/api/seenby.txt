@@ -47,12 +47,14 @@ def blobs(change, gw, gh, cell=8)
     """Changed areas of one sample in native pixels, or one blob for the whole frame when most of it changed."""
 def block_max(a, b, bs=8)
     """Largest mean difference over the bs x bs blocks of two thumbnails."""
+def box_marks(boxes, numbers, width, height)
+    """The marks [(x, y, text)] of the `boxes` of a tile `width` x `height`, one per box that has `numbers`: its crops"""
 def change_boxes(regions, native_width, width, height)
     """Boxes to draw around `regions` on a tile: scaled, padded, joined when close, dropped when they cover the tile."""
 def change_grids(path, width, height, fps=4, start=0.0, length=None)
     """Cell grids of a recording: per sample the cell means and the share of pixels changed since the previous one."""
 def check_out_dir(out_dir, force)
-    """None when the directory is ours to clean, otherwise the refusal to print."""
+    """None when the directory is ours to clean, otherwise the refusal to print: clean() would remove files with"""
 def clean(out_dir)
     """Remove our own files from a previous run, leave everything else alone."""
 def contact_sheets(paths, out_dir, cols, rows, boxes=None, marks=None)
@@ -76,6 +78,8 @@ def label_band(text, width)
     """A white band LABEL_H px high and `width` wide with `text` in a 5x7 font at double size, as PGM bytes."""
 def layout(width, height, n_frames, sheet_width=1568, rows=None, tile_width=None)
     """(grade, tile, cols, rows, sheets) so that no sheet side exceeds sheet_width."""
+def looks_same(a, b)
+    """True when no 16x16 block of two RGB pictures of one area has BOX_SPREAD px whose luma differs by more than"""
 def main()
 def mark_image(width, height, marks)
     """An RGBA PAM `width` x `height`, transparent but for `marks` [(x, y, text)]: magenta digits on white, 18 px high."""
