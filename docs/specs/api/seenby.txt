@@ -106,6 +106,6 @@ def select_frames(thumbs, threshold, max_gap, block_k=5.0, sample_fps=2, quiet=(
     """Kept thumbnails as {time, diff, block, reason}, both measured against the last kept one."""
 def thumbnails(path, sample_fps=2, start=0.0, length=None)
     """Grey THUMB x THUMB thumbnails, sample_fps per second, as one raw stream."""
-def write_crops(path, out_dir, screens, crops, tiles, width, height, fps=4, start=0.0, length=None)
+def write_crops(path, out_dir, screens, crops, tiles, points, width, height, fps=4, start=0.0, length=None)
     """Cut each crop of crop_units before and after its change at native size, and each screen's full frame, in one"""
 def write_json(path, data)

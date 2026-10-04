@@ -1415,12 +1415,16 @@ class Run:
     beside `contact_sheets_calls`, and the number of arguments of each call in `contact_sheets_arity`.
     `kept_changes` returns `changes`, or raises it when it is an exception; without `changes` it returns `None`
     for the first index and two all-zero 20 x 10 grids for every other (BOX-3 examples).
+    `contact_sheets` also takes `marks` as a sixth argument, default None (CRP-6), recorded in
+    `contact_sheets_marks`.
+    `write_crops` records its arguments in `write_crops_calls` and returns `crops` (None by default), or raises it
+    when it is an exception (CRP-6).
     `watch` is a path whose existence is recorded at the moment each fake is called.
     """
 
     def __init__(
         self, monkeypatch, probe, thumbs, frames, sheets, tools, watch, samples=None, display=None,
-        version=FFMPEG_VERSION_LINE, changes=None,
+        version=FFMPEG_VERSION_LINE, changes=None, crops=None,
     ):
         self.probe_calls = []
         self.thumbnails_calls = []
@@ -1431,6 +1435,8 @@ class Run:
         self.contact_sheets_calls = []
         self.contact_sheets_boxes = []
         self.contact_sheets_arity = []
+        self.contact_sheets_marks = []
+        self.write_crops_calls = []
         self.kept_changes_calls = []
         self.saved_samples = []
         self.ffmpeg_version_calls = 0
@@ -1487,10 +1493,11 @@ class Run:
                 return [None] + [(bytes(20 * 10), bytes(20 * 10))] * (len(indices) - 1)
             return outcome(changes)
 
-        def fake_contact_sheets(paths, out_dir, cols, rows, boxes=None):
+        def fake_contact_sheets(paths, out_dir, cols, rows, boxes=None, marks=None):
             note("contact_sheets")
             self.contact_sheets_calls.append((paths, out_dir, cols, rows))
             self.contact_sheets_boxes.append(boxes)
+            self.contact_sheets_marks.append(marks)
             if sheets is None:
                 return [f"{out_dir}/sheet-01.jpg"]
             return outcome(sheets)
@@ -1498,6 +1505,15 @@ class Run:
         def counted_contact_sheets(*args, **kwargs):
             self.contact_sheets_arity.append(len(args) + len(kwargs))
             return fake_contact_sheets(*args, **kwargs)
+
+        def fake_write_crops(
+            path, out_dir, screens, crop_list, tiles, points, width, height, fps=4, start=0.0, length=None
+        ):
+            note("write_crops")
+            self.write_crops_calls.append(
+                (path, out_dir, screens, crop_list, tiles, points, width, height, fps, start, length)
+            )
+            return outcome(crops)
 
         def fake_require_tools():
             return tools
@@ -1514,6 +1530,7 @@ class Run:
         monkeypatch.setattr(seenby, "save_samples", fake_save_samples, raising=False)
         monkeypatch.setattr(seenby, "contact_sheets", counted_contact_sheets)
         monkeypatch.setattr(seenby, "kept_changes", fake_kept_changes, raising=False)
+        monkeypatch.setattr(seenby, "write_crops", fake_write_crops)
         monkeypatch.setattr(seenby, "require_tools", fake_require_tools)
         monkeypatch.setattr(seenby, "ffmpeg_version", fake_ffmpeg_version)
 
@@ -1535,6 +1552,7 @@ def run_main(
     version=FFMPEG_VERSION_LINE,
     as_given=False,
     changes=None,
+    crops=None,
 ):
     """main() with the fakes in place. Unless `as_given`, an argv without `--selector` gets the selector its row
     implies (CLI-28): `legacy` for a row that fakes only `thumbnails`, `events` for one that fakes `change_grids`."""
@@ -1545,7 +1563,7 @@ def run_main(
         video.write_bytes(b"")
     if not as_given and "--selector" not in argv:
         argv = argv + ["--selector", "legacy" if samples is None else "events"]
-    run = Run(monkeypatch, probe, thumbs, frames, sheets, tools, watch, samples, display, version, changes)
+    run = Run(monkeypatch, probe, thumbs, frames, sheets, tools, watch, samples, display, version, changes, crops)
     monkeypatch.setattr(sys, "argv", ["seenby.py"] + argv)
     run.rc = seenby.main()
     captured = capsys.readouterr()
@@ -6251,3 +6269,688 @@ def test_box_3_the_legacy_selector_calls_contact_sheets_with_four_arguments(monk
     assert run.contact_sheets_arity == [4]
     assert run.contact_sheets_boxes == [None]
     assert run.kept_changes_calls == []
+
+
+# ---------------------------------------------------------------- Step 16: crops of every change at native size
+
+# -------- CRP-1 (crop_units)
+
+
+def E(x, y, w, h, start, settled):
+    return {"x": x, "y": y, "w": w, "h": h, "start": start, "settled": settled}
+
+
+def unit(rect, events, crop, start, settled, screen):
+    return {"rect": rect, "events": events, "crop": crop, "start": start, "settled": settled, "screen": screen}
+
+
+def screen_of(start, key, crops, n):
+    return {"start": start, "key": key, "crops": crops, "n": n}
+
+
+def a4():
+    return [E(40 + 380 * i, 40, 300, 300, 2 + i, 3 + i) for i in range(4)]
+
+
+def a4_units():
+    return [unit([40 + 380 * i, 40, 300, 300], [i], [24 + 380 * i, 24, 332, 332], 2 + i, 3 + i, 1) for i in range(4)]
+
+
+def late():
+    return E(40, 440, 24, 24, 11, 12)
+
+
+@pytest.mark.spec("CRP-1")
+def test_crp_1_no_events_give_one_empty_screen():
+    assert seenby.crop_units([], 1600, 800, 40) == ([screen_of(0, 0, [], 1)], [])
+
+
+@pytest.mark.spec("CRP-1")
+def test_crp_1_no_events_in_under_a_second_give_nothing():
+    assert seenby.crop_units([], 1600, 800, 3) == ([], [])
+
+
+@pytest.mark.spec("CRP-1")
+def test_crp_1_near_changes_of_a_moment_share_a_crop_far_ones_do_not():
+    events = [E(100, 100, 24, 24, 3, 4), E(200, 100, 24, 24, 4, 4), E(1000, 500, 40, 20, 4, 4)]
+    screens, crops = seenby.crop_units(events, 1600, 800, 40)
+    assert crops == [
+        unit([100, 100, 124, 24], [0, 1], [84, 84, 156, 56], 3, 4, 1),
+        unit([1000, 500, 40, 20], [2], [984, 484, 72, 52], 4, 4, 1),
+    ]
+    assert screens == [screen_of(0, 0, crops, 1)]
+    assert screens[0]["crops"][0] is crops[0]
+    assert screens[0]["crops"][1] is crops[1]
+
+
+@pytest.mark.spec("CRP-1")
+def test_crp_1_units_are_sorted_by_y_then_x():
+    events = [E(1000, 500, 40, 20, 4, 4), E(100, 100, 24, 24, 3, 4)]
+    screens, crops = seenby.crop_units(events, 1600, 800, 40)
+    assert crops == [
+        unit([100, 100, 24, 24], [1], [84, 84, 56, 56], 3, 4, 1),
+        unit([1000, 500, 40, 20], [0], [984, 484, 72, 52], 4, 4, 1),
+    ]
+    assert screens == [screen_of(0, 0, crops, 1)]
+
+
+@pytest.mark.spec("CRP-1")
+@pytest.mark.parametrize(
+    "second_x, expected",
+    [
+        (251, [unit([100, 100, 175, 24], [0, 1], [84, 84, 207, 56], 3, 4, 1)]),
+        (
+            252,
+            [
+                unit([100, 100, 24, 24], [0], [84, 84, 56, 56], 3, 4, 1),
+                unit([252, 100, 24, 24], [1], [236, 84, 56, 56], 4, 4, 1),
+            ],
+        ),
+    ],
+    ids=["gap-127-joins", "gap-128-stays-apart"],
+)
+def test_crp_1_join_distance_is_under_128_px(second_x, expected):
+    events = [E(100, 100, 24, 24, 3, 4), E(second_x, 100, 24, 24, 4, 4)]
+    screens, crops = seenby.crop_units(events, 1600, 800, 40)
+    assert crops == expected
+    assert screens == [screen_of(0, 0, crops, 1)]
+
+
+@pytest.mark.spec("CRP-1")
+def test_crp_1_changes_of_different_moments_never_share_a_crop():
+    events = [E(100, 100, 24, 24, 1, 2), E(130, 100, 24, 24, 3, 4)]
+    screens, crops = seenby.crop_units(events, 1600, 800, 40)
+    assert crops == [
+        unit([100, 100, 24, 24], [0], [84, 84, 56, 56], 1, 2, 1),
+        unit([130, 100, 24, 24], [1], [114, 84, 56, 56], 3, 4, 1),
+    ]
+    assert screens == [screen_of(0, 0, crops, 1)]
+
+
+@pytest.mark.spec("CRP-1")
+@pytest.mark.parametrize(
+    "second_x, expected",
+    [
+        (320, [unit([0, 0, 420, 300], [0, 1], [0, 0, 436, 316], 3, 4, 1)]),
+        (
+            360,
+            [
+                unit([0, 0, 300, 300], [0], [0, 0, 316, 316], 3, 4, 1),
+                unit([360, 0, 100, 100], [1], [344, 0, 132, 116], 4, 4, 1),
+            ],
+        ),
+    ],
+    ids=["126000-px-joins", "138000-px-over-the-share-stays-apart"],
+)
+def test_crp_1_a_joined_crop_stays_within_the_crop_share(second_x, expected):
+    events = [E(0, 0, 300, 300, 3, 4), E(second_x, 0, 100, 100, 4, 4)]
+    screens, crops = seenby.crop_units(events, 1600, 800, 40)
+    assert crops == expected
+    assert screens == [screen_of(0, 0, crops, 1)]
+
+
+@pytest.mark.spec("CRP-1")
+def test_crp_1_a_chain_joins_the_first_pair_in_list_order():
+    events = [E(0, 0, 200, 200, 3, 4), E(260, 0, 200, 200, 4, 4), E(520, 0, 200, 200, 2, 4)]
+    screens, crops = seenby.crop_units(events, 1600, 800, 40)
+    assert crops == [
+        unit([0, 0, 460, 200], [0, 1], [0, 0, 476, 216], 3, 4, 1),
+        unit([520, 0, 200, 200], [2], [504, 0, 232, 216], 2, 4, 1),
+    ]
+    assert screens == [screen_of(0, 0, crops, 1)]
+
+
+@pytest.mark.spec("CRP-1")
+def test_crp_1_the_same_chain_in_reverse_order_joins_the_other_pair():
+    events = [E(520, 0, 200, 200, 2, 4), E(260, 0, 200, 200, 4, 4), E(0, 0, 200, 200, 3, 4)]
+    screens, crops = seenby.crop_units(events, 1600, 800, 40)
+    assert crops == [
+        unit([0, 0, 200, 200], [2], [0, 0, 216, 216], 3, 4, 1),
+        unit([260, 0, 460, 200], [0, 1], [244, 0, 492, 216], 2, 4, 1),
+    ]
+    assert screens == [screen_of(0, 0, crops, 1)]
+
+
+@pytest.mark.spec("CRP-1")
+def test_crp_1_halo_of_70_by_70_cells_stays_one_screen_with_its_crop():
+    screens, crops = seenby.crop_units([E(200, 200, 432, 432, 3, 4)], 1600, 800, 40)
+    assert crops == [unit([200, 200, 432, 432], [0], [184, 184, 464, 464], 3, 4, 1)]
+    assert screens == [screen_of(0, 0, crops, 1)]
+
+
+@pytest.mark.spec("CRP-1")
+def test_crp_1_halo_of_71_by_71_cells_starts_a_screen_and_gets_no_crop():
+    screens, crops = seenby.crop_units([E(200, 200, 440, 440, 3, 4)], 1600, 800, 40)
+    assert crops == []
+    assert screens == [screen_of(0, 0, [], 1), screen_of(4, 4, [], 2)]
+
+
+@pytest.mark.spec("CRP-1")
+def test_crp_1_a_redraw_starts_a_screen_keyed_on_its_own_sample():
+    events = [E(100, 100, 24, 24, 3, 4), E(0, 0, 1600, 800, 9, 10), E(700, 300, 40, 20, 19, 20)]
+    screens, crops = seenby.crop_units(events, 1600, 800, 40)
+    assert crops == [
+        unit([100, 100, 24, 24], [0], [84, 84, 56, 56], 3, 4, 1),
+        unit([700, 300, 40, 20], [2], [684, 284, 72, 52], 19, 20, 2),
+    ]
+    assert screens == [screen_of(0, 0, crops[:1], 1), screen_of(10, 10, crops[1:], 2)]
+
+
+@pytest.mark.spec("CRP-1")
+def test_crp_1_a_screen_of_one_sample_without_crops_is_dropped():
+    events = [
+        E(100, 100, 24, 24, 3, 4), E(0, 0, 1600, 800, 9, 10), E(0, 0, 1600, 800, 10, 11), E(700, 300, 40, 20, 19, 20),
+    ]
+    screens, crops = seenby.crop_units(events, 1600, 800, 40)
+    assert crops == [
+        unit([100, 100, 24, 24], [0], [84, 84, 56, 56], 3, 4, 1),
+        unit([700, 300, 40, 20], [3], [684, 284, 72, 52], 19, 20, 2),
+    ]
+    assert screens == [screen_of(0, 0, crops[:1], 1), screen_of(11, 11, crops[1:], 2)]
+
+
+@pytest.mark.spec("CRP-1")
+def test_crp_1_a_last_screen_under_a_second_is_dropped():
+    screens, crops = seenby.crop_units([E(0, 0, 1600, 800, 37, 38)], 1600, 800, 40)
+    assert (screens, crops) == ([screen_of(0, 0, [], 1)], [])
+
+
+@pytest.mark.spec("CRP-1")
+def test_crp_1_accumulated_crops_past_the_screen_share_start_a_screen_keyed_a_sample_earlier():
+    screens, crops = seenby.crop_units(a4() + [late()], 1600, 800, 40)
+    late_unit = unit([40, 440, 24, 24], [4], [24, 424, 56, 56], 11, 12, 2)
+    assert crops == a4_units() + [late_unit]
+    assert screens == [screen_of(0, 0, crops[:4], 1), screen_of(7, 6, [crops[4]], 2)]
+
+
+@pytest.mark.spec("CRP-1")
+def test_crp_1_three_accumulated_crops_stay_on_the_first_screen():
+    screens, crops = seenby.crop_units(a4()[:3] + [late()], 1600, 800, 40)
+    assert crops == a4_units()[:3] + [unit([40, 440, 24, 24], [3], [24, 424, 56, 56], 11, 12, 1)]
+    assert screens == [screen_of(0, 0, crops, 1)]
+
+
+@pytest.mark.spec("CRP-1")
+def test_crp_1_a_screen_made_by_accumulation_takes_the_key_of_a_redraw_right_after():
+    events = a4() + [E(0, 0, 1600, 800, 6, 7), late()]
+    screens, crops = seenby.crop_units(events, 1600, 800, 40)
+    assert crops == a4_units() + [unit([40, 440, 24, 24], [5], [24, 424, 56, 56], 11, 12, 2)]
+    assert screens == [screen_of(0, 0, crops[:4], 1), screen_of(7, 7, [crops[4]], 2)]
+
+
+@pytest.mark.spec("CRP-1")
+def test_crp_1_a_redraw_two_samples_after_accumulation_drops_the_short_screen():
+    events = a4() + [E(0, 0, 1600, 800, 8, 9), late()]
+    screens, crops = seenby.crop_units(events, 1600, 800, 40)
+    assert crops == a4_units() + [unit([40, 440, 24, 24], [5], [24, 424, 56, 56], 11, 12, 2)]
+    assert screens == [screen_of(0, 0, crops[:4], 1), screen_of(9, 9, [crops[4]], 2)]
+
+
+# -------- CRP-P1 (properties of crop_units)
+
+
+def crp_events():
+    def build(w, h, x_frac, y_frac, settled, start_frac):
+        x = x_frac % (1600 - w + 1)
+        y = y_frac % (800 - h + 1)
+        start = 1 + start_frac % settled
+        return E(x, y, w, h, start, settled)
+
+    event = st.builds(
+        build,
+        st.integers(min_value=8, max_value=400),
+        st.integers(min_value=8, max_value=400),
+        st.integers(min_value=0, max_value=10**6),
+        st.integers(min_value=0, max_value=10**6),
+        st.integers(min_value=1, max_value=39),
+        st.integers(min_value=0, max_value=10**6),
+    )
+    return st.lists(event, min_size=0, max_size=8)
+
+
+@pytest.mark.spec("CRP-P1")
+@settings(deadline=None)
+@given(crp_events())
+def test_crp_p1_crops_and_screens_keep_their_invariants(events):
+    screens, crops = seenby.crop_units(events, 1600, 800, 40)
+    seen = [i for crop in crops for i in crop["events"]]
+    assert len(seen) == len(set(seen))
+    for crop in crops:
+        members = [events[i] for i in crop["events"]]
+        x0 = min(e["x"] for e in members)
+        y0 = min(e["y"] for e in members)
+        x1 = max(e["x"] + e["w"] for e in members)
+        y1 = max(e["y"] + e["h"] for e in members)
+        assert crop["rect"] == [x0, y0, x1 - x0, y1 - y0]
+        assert all(e["settled"] == crop["settled"] for e in members)
+        assert crop["start"] == min(e["start"] for e in members)
+        if len(members) >= 2:
+            assert crop["rect"][2] * crop["rect"][3] <= seenby.CROP_SHARE * 1600 * 800
+        cx, cy, cw, ch = crop["crop"]
+        rx, ry, rw, rh = crop["rect"]
+        assert 0 <= cx and 0 <= cy and cx + cw <= 1600 and cy + ch <= 800
+        assert cx <= rx and cy <= ry and rx + rw <= cx + cw and ry + rh <= cy + ch
+    assert [s["n"] for s in screens] == list(range(1, len(screens) + 1))
+    starts = [s["start"] for s in screens]
+    assert all(a < b for a, b in zip(starts, starts[1:]))
+    assert all(s["key"] in (s["start"], s["start"] - 1) for s in screens)
+    ends = starts[1:] + [40]
+    for s, end in zip(screens, ends):
+        for crop in s["crops"]:
+            assert crop["screen"] == s["n"]
+            assert s["start"] <= crop["settled"] < end
+            assert sum(crop is c for c in crops) == 1
+    in_screens = [crop for s in screens for crop in s["crops"]]
+    assert len(in_screens) == len(crops)
+    assert all(a is b for a, b in zip(in_screens, crops))
+
+
+# -------- CRP-2 (mark_image), CRP-3 (the glyph >)
+
+MARK_HEADER = b"P7\nWIDTH %d\nHEIGHT %d\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n"
+CLEAR, WHITE, MAGENTA = (0, 0, 0, 0), (255, 255, 255, 255), (255, 0, 255, 255)
+ARROW = "10000 01000 00100 00010 00100 01000 10000"
+
+
+def mark_pixels(image, width, height):
+    header = MARK_HEADER % (width, height)
+    assert image[: len(header)] == header
+    body = image[len(header):]
+    assert len(body) == 4 * width * height
+    return [[tuple(body[4 * (y * width + x): 4 * (y * width + x) + 4]) for x in range(width)] for y in range(height)]
+
+
+def mark_counts(rows):
+    flat_pixels = [p for row in rows for p in row]
+    return flat_pixels.count(CLEAR), flat_pixels.count(WHITE), flat_pixels.count(MAGENTA)
+
+
+def reference_mark(width, height, marks):
+    """CRP-2 from the rule text: white box, then 2x2 magenta pixels for each 1 of the glyph, later marks on top."""
+    glyphs = dict(GLYPHS, **{">": ARROW})
+    rows = [[CLEAR] * width for _ in range(height)]
+
+    def put(x, y, value):
+        if 0 <= x < width and 0 <= y < height:
+            rows[y][x] = value
+
+    for x0, y0, text in marks:
+        for y in range(y0, y0 + 18):
+            for x in range(x0, x0 + 12 * len(text) + 2):
+                put(x, y, WHITE)
+        for i, char in enumerate(text):
+            for r, bits in enumerate(glyphs.get(char, "").split()):
+                for c, bit in enumerate(bits):
+                    if bit == "1":
+                        for dy in (0, 1):
+                            for dx in (0, 1):
+                                put(x0 + 2 + 12 * i + 2 * c + dx, y0 + 2 + 2 * r + dy, MAGENTA)
+    return rows
+
+
+@pytest.mark.spec("CRP-2")
+def test_crp_2_no_marks_give_a_transparent_image_of_193_bytes():
+    image = seenby.mark_image(8, 4, [])
+    assert isinstance(image, bytes)
+    assert image == b"P7\nWIDTH 8\nHEIGHT 4\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n" + bytes(128)
+    assert len(image) == 193
+
+
+@pytest.mark.spec("CRP-2")
+def test_crp_2_one_digit_on_white_in_a_30_by_20_image():
+    image = seenby.mark_image(30, 20, [(1, 1, "1")])
+    assert len(image) == 2467
+    rows = mark_pixels(image, 30, 20)
+    assert mark_counts(rows) == (348, 212, 40)
+    assert [rows[3][7], rows[4][8], rows[5][7]] == [MAGENTA] * 3
+    assert [rows[1][1], rows[18][14], rows[3][6]] == [WHITE] * 3
+    assert [rows[1][15], rows[0][0]] == [CLEAR] * 2
+
+
+@pytest.mark.spec("CRP-2")
+def test_crp_2_a_mark_off_the_left_edge_is_cut_not_shifted():
+    rows = mark_pixels(seenby.mark_image(10, 10, [(-3, 5, "8")]), 10, 10)
+    assert mark_counts(rows) == (50, 35, 15)
+    assert all(p == CLEAR for row in rows[:5] for p in row)
+    assert rows[7][1:7] == [MAGENTA] * 6
+    assert [rows[7][x] for x in (0, 7, 8, 9)] == [WHITE] * 4
+
+
+@pytest.mark.spec("CRP-2")
+def test_crp_2_a_later_mark_paints_over_an_earlier_one():
+    rows = mark_pixels(seenby.mark_image(40, 20, [(0, 0, "8"), (6, 0, "1")]), 40, 20)
+    assert mark_counts(rows) == (440, 292, 68)
+    assert [rows[2][x] for x in (4, 5)] == [MAGENTA] * 2
+    assert rows[2][6:12] == [WHITE] * 6
+
+
+@pytest.mark.spec("CRP-2")
+def test_crp_2_a_character_without_a_glyph_takes_its_12_px_and_draws_no_ink():
+    rows = mark_pixels(seenby.mark_image(40, 20, [(0, 0, "0?")]), 40, 20)
+    assert mark_counts(rows) == (332, 392, 76)
+
+
+@pytest.mark.spec("CRP-2")
+@pytest.mark.spec("CRP-3")
+@pytest.mark.parametrize("char", list(GLYPHS) + [">"], ids=GLYPH_IDS + ["arrow"])
+def test_crp_2_3_every_glyph_is_drawn_by_the_rule(char):
+    assert seenby.mark_image(20, 24, [(3, 2, char)]) == MARK_HEADER % (20, 24) + b"".join(
+        bytes(p) for row in reference_mark(20, 24, [(3, 2, char)]) for p in row
+    )
+
+
+@pytest.mark.spec("CRP-2")
+@pytest.mark.parametrize(
+    "width, height, marks",
+    [
+        (60, 30, [(5, 6, "12"), (40, 20, "3>")]),
+        (30, 20, [(20, 10, "#07")]),
+        (30, 20, [(-40, -4, "0000")]),
+        (50, 30, [(2, 2, "88"), (10, 8, "11")]),
+    ],
+    ids=["two-marks", "cut-on-the-right", "cut-on-top-left", "overlap"],
+)
+def test_crp_2_more_placements_match_the_rule(width, height, marks):
+    rows = mark_pixels(seenby.mark_image(width, height, marks), width, height)
+    assert rows == reference_mark(width, height, marks)
+
+
+@pytest.mark.spec("CRP-3")
+def test_crp_3_label_band_draws_the_arrow_glyph():
+    band = seenby.label_band(">", 20)
+    assert len(band) == 453
+    pixels = band_pixels(band, 20)
+    assert pixels.count(0) == 48
+    at = lambda x, y: pixels[y * 20 + x]
+    assert [at(4, 4), at(5, 5), at(6, 6), at(10, 10), at(4, 16), at(5, 17)] == [0] * 6
+    assert [at(6, 4), at(12, 10)] == [255, 255]
+
+
+# -------- CRP-7 (clean also removes screens and crops)
+
+
+@pytest.mark.spec("CRP-7")
+def test_crp_7_removes_screens_crops_and_crops_json_only(tmp_path):
+    names = [
+        "screen-01-0.00s.jpg", "screen-02-12.25s.jpg", "crops-01.png", "crops-01b.png", "crops.json", "crops-01.jpg",
+        "screen.jpg", "Screen-01.jpg", "crop-01-before.png", "crops.json.tmp", "frames.json",
+    ]
+    populate(tmp_path, names)
+    seenby.clean(tmp_path)
+    assert sorted(os.listdir(tmp_path)) == [
+        "Screen-01.jpg", "crop-01-before.png", "crops-01.jpg", "crops.json.tmp", "screen.jpg",
+    ]
+
+
+# -------- CRP-6 (main() calls crop_units and write_crops, marks the tiles, names the files), CRP-8 (frames.json)
+
+WIDE_PROBE = (2.0, 1600, 80)
+TWO_TILES = {0: 1, 1: 1, 2: 2}
+TWO_POINTS = [0, 4, 6]
+SCREEN_FILE = "screen-01-0.00s.jpg"
+
+
+def lc(files):
+    return f"  crops, every change at native size before > after, numbered as on the sheets: {files}"
+
+
+def ls(files):
+    return (
+        f"  screens, a full native frame of each screen as it starts, for reading text and digits: {files}; "
+        "all listed in out/crops.json"
+    )
+
+
+def crop_entry(n, tile, rect, events, file):
+    return {"n": n, "tile": tile, "rect": rect, "events": events, "file": file}
+
+
+def result_r():
+    return {
+        "crops": [
+            crop_entry(1, 1, [16, 16, 24, 24], [0], "crops-01.png"),
+            crop_entry(2, 1, [96, 16, 24, 24], [1], "crops-01.png"),
+            crop_entry(3, 2, [16, 16, 24, 24], [2], "crops-01.png"),
+        ],
+        "images": ["crops-01.png"],
+        "screens": [{"n": 1, "start": 0, "file": SCREEN_FILE}],
+        "left": 0,
+    }
+
+
+def result_r2():
+    return {
+        "crops": [
+            crop_entry(1, 1, [96, 48, 24, 24], [0], "crops-01.png"),
+            crop_entry(2, 1, [1590, 48, 8, 8], [1], "crops-01b.png"),
+            crop_entry(3, 2, [16, 0, 24, 8], [2], "crops-02.png"),
+        ],
+        "images": ["crops-01.png", "crops-01b.png", "crops-02.png"],
+        "screens": [{"n": 1, "start": 0, "file": SCREEN_FILE}, {"n": 2, "start": 5, "file": "screen-02-1.00s.jpg"}],
+        "left": 1,
+    }
+
+
+def result_r3():
+    return {
+        "crops": [crop_entry(1, None, [16, 16, 104, 24], [0, 1], "crops-01.png")],
+        "images": ["crops-01.png"],
+        "screens": [{"n": 1, "start": 0, "file": SCREEN_FILE}],
+        "left": 1,
+    }
+
+
+def result_r4():
+    return {"crops": [], "images": [], "screens": [], "left": 3}
+
+
+def run_crops(monkeypatch, capsys, tmp_path, crops, extra=(), probe=WIDE_PROBE, sheets=None):
+    return run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out"] + list(extra), static(4),
+        probe=probe, samples=events_two(), changes=TWO_CHANGES, crops=crops, sheets=sheets,
+    )
+
+
+@pytest.mark.spec("CRP-6")
+def test_crp_6_write_crops_gets_the_units_the_tiles_and_the_sample_points(monkeypatch, capsys, tmp_path):
+    run = run_crops(monkeypatch, capsys, tmp_path, None)
+    assert run.rc == 0
+    crops = [
+        unit([16, 16, 24, 24], [0], [0, 0, 56, 56], 1, 1, 1),
+        unit([96, 16, 24, 24], [1], [80, 0, 56, 56], 3, 3, 1),
+        unit([16, 16, 24, 24], [2], [0, 0, 56, 56], 5, 5, 1),
+    ]
+    screens = [screen_of(0, 0, crops, 1)]
+    assert run.write_crops_calls == [("clip.mp4", "out", screens, crops, TWO_TILES, TWO_POINTS, 1600, 80, 4, 0.0, None)]
+    assert run.contact_sheets_arity == [5]
+    assert run.contact_sheets_marks == [None]
+    assert run.out.splitlines()[-1] == MANIFEST_LINE.format(out_dir="out")
+    assert run.err == ""
+
+
+@pytest.mark.spec("CRP-6")
+def test_crp_6_a_result_puts_numbered_marks_on_the_tiles_and_names_the_files(monkeypatch, capsys, tmp_path):
+    run = run_crops(monkeypatch, capsys, tmp_path, result_r())
+    assert run.rc == 0
+    assert run.contact_sheets_arity == [6]
+    assert run.contact_sheets_marks == [[[], [(2, 21, "01"), (41, 21, "02")], [(2, 21, "03")]]]
+    assert run.out.splitlines()[-3:] == [
+        MANIFEST_LINE.format(out_dir="out"), lc("out/crops-01.png"), ls("out/screen-01-0.00s.jpg"),
+    ]
+    assert run.err == ""
+
+
+@pytest.mark.spec("CRP-6")
+def test_crp_6_marks_sit_above_the_box_when_there_is_room_and_stay_within_the_tile(monkeypatch, capsys, tmp_path):
+    run = run_crops(monkeypatch, capsys, tmp_path, result_r2())
+    assert run.rc == 0
+    assert run.contact_sheets_marks == [[[], [(41, 0, "01"), (750, 0, "02")], [(2, 9, "03")]]]
+    assert run.out.splitlines()[-2:] == [
+        lc("out/crops-01.png, out/crops-01b.png, out/crops-02.png"),
+        ls("out/screen-01-0.00s.jpg, out/screen-02-1.00s.jpg"),
+    ]
+
+
+@pytest.mark.spec("CRP-6")
+@pytest.mark.parametrize(
+    "result, crops_line, screens_line",
+    [
+        (result_r3, "out/crops-01.png", "out/screen-01-0.00s.jpg"),
+        (result_r4, "none", "none"),
+    ],
+    ids=["no-crop-has-a-tile", "nothing-written"],
+)
+def test_crp_6_without_a_tile_on_any_crop_the_sheets_get_no_marks(
+    monkeypatch, capsys, tmp_path, result, crops_line, screens_line
+):
+    run = run_crops(monkeypatch, capsys, tmp_path, result())
+    assert run.rc == 0
+    assert run.contact_sheets_arity == [5]
+    assert run.contact_sheets_marks == [None]
+    assert run.out.splitlines()[-2:] == [lc(crops_line), ls(screens_line)]
+
+
+@pytest.mark.spec("CRP-6")
+@pytest.mark.spec("CRP-8")
+@pytest.mark.parametrize(
+    "error, message",
+    [
+        (OSError(2, "No such file or directory"), "  crops not written: [Errno 2] No such file or directory\n"),
+        (
+            subprocess.CalledProcessError(1, ["ffmpeg"]),
+            "  crops not written: Command '['ffmpeg']' returned non-zero exit status 1.\n",
+        ),
+    ],
+    ids=["oserror", "called-process-error"],
+)
+def test_crp_6_a_failing_write_crops_is_reported_and_the_run_goes_on(monkeypatch, capsys, tmp_path, error, message):
+    run = run_crops(monkeypatch, capsys, tmp_path, error)
+    assert run.rc == 0
+    assert run.err == message
+    assert run.contact_sheets_arity == [5]
+    assert run.out.splitlines()[-1] == MANIFEST_LINE.format(out_dir="out")
+    data = manifest()
+    assert list(data) == EVENTS_TOP_LEVEL_KEYS
+    assert all(list(event) == EVENTS_EVENT_KEYS for event in data["events"])
+
+
+@pytest.mark.spec("CRP-6")
+def test_crp_6_a_range_gives_write_crops_its_start_and_length(monkeypatch, capsys, tmp_path):
+    run = run_crops(monkeypatch, capsys, tmp_path, None, extra=["--from", "1"], probe=(3.0, 1600, 80))
+    assert run.rc == 0
+    assert len(run.write_crops_calls) == 1
+    assert run.write_crops_calls[0][4:] == (TWO_TILES, TWO_POINTS, 1600, 80, 4, 1.0, 2.0)
+
+
+@pytest.mark.spec("CRP-6")
+def test_crp_6_a_narrow_frame_makes_every_screen_short_and_leaves_no_units(monkeypatch, capsys, tmp_path):
+    run = run_crops(monkeypatch, capsys, tmp_path, None, probe=EVENTS_PROBE)
+    assert run.rc == 0
+    assert run.write_crops_calls == [("clip.mp4", "out", [], [], TWO_TILES, TWO_POINTS, 160, 80, 4, 0.0, None)]
+
+
+@pytest.mark.spec("CRP-6")
+def test_crp_6_one_frame_does_not_call_write_crops(monkeypatch, capsys, tmp_path):
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(4),
+        probe=EVENTS_PROBE, samples=[S({})], changes=TWO_CHANGES, crops=result_r(),
+    )
+    assert run.rc == 0
+    assert run.write_crops_calls == []
+
+
+@pytest.mark.spec("CRP-6")
+def test_crp_6_a_dry_run_does_not_call_write_crops(monkeypatch, capsys, tmp_path):
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--dry-run"], static(4),
+        probe=EVENTS_PROBE, samples=events_two(), changes=TWO_CHANGES, crops=result_r(),
+    )
+    assert run.rc == 0
+    assert run.write_crops_calls == []
+
+
+@pytest.mark.spec("CRP-6")
+def test_crp_6_the_legacy_selector_does_not_call_write_crops(monkeypatch, capsys, tmp_path):
+    run = run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out", "--selector", "legacy"], static(30), crops=result_r()
+    )
+    assert run.rc == 0
+    assert run.write_crops_calls == []
+    assert run.contact_sheets_arity == [4]
+
+
+@pytest.mark.spec("CRP-6")
+def test_crp_6_a_sheets_error_message_is_the_only_stderr(monkeypatch, capsys, tmp_path):
+    run = run_crops(
+        monkeypatch, capsys, tmp_path, None, probe=EVENTS_PROBE,
+        sheets=ValueError("ffprobe could not read the frame width of out/frame-01.jpg"),
+    )
+    assert run.err == "clip.mp4: ffprobe could not read the frame width of out/frame-01.jpg\n"
+
+
+@pytest.mark.spec("CRP-8")
+def test_crp_8_without_a_result_frames_json_is_that_of_man_17(monkeypatch, capsys, tmp_path):
+    run = run_crops(monkeypatch, capsys, tmp_path, None)
+    assert run.rc == 0
+    data = manifest()
+    assert list(data) == EVENTS_TOP_LEVEL_KEYS
+    assert data["events"] and all(list(event) == EVENTS_EVENT_KEYS for event in data["events"])
+
+
+@pytest.mark.spec("CRP-8")
+def test_crp_8_a_result_adds_the_crops_key_and_a_crop_per_event(monkeypatch, capsys, tmp_path):
+    run = run_crops(monkeypatch, capsys, tmp_path, result_r())
+    assert run.rc == 0
+    data = manifest()
+    assert list(data) == EVENTS_TOP_LEVEL_KEYS + ["crops"]
+    assert data["crops"] == {
+        "file": "crops.json", "images": ["crops-01.png"], "screens": [{"n": 1, "from": 0.0, "file": SCREEN_FILE}],
+    }
+    assert all(list(event) == EVENTS_EVENT_KEYS + ["crop"] for event in data["events"])
+    assert [event["crop"] for event in data["events"]] == [{"n": n, "file": "crops-01.png"} for n in (1, 2, 3)]
+    assert [list(event["crop"]) for event in data["events"]] == [["n", "file"]] * 3
+
+
+@pytest.mark.spec("CRP-8")
+def test_crp_8_crops_on_several_pages_and_screens_are_listed_in_order(monkeypatch, capsys, tmp_path):
+    run = run_crops(monkeypatch, capsys, tmp_path, result_r2())
+    assert run.rc == 0
+    data = manifest()
+    assert data["crops"] == {
+        "file": "crops.json",
+        "images": ["crops-01.png", "crops-01b.png", "crops-02.png"],
+        "screens": [
+            {"n": 1, "from": 0.0, "file": SCREEN_FILE}, {"n": 2, "from": 1.25, "file": "screen-02-1.00s.jpg"},
+        ],
+    }
+    assert [event["crop"] for event in data["events"]] == [
+        {"n": 1, "file": "crops-01.png"}, {"n": 2, "file": "crops-01b.png"}, {"n": 3, "file": "crops-02.png"},
+    ]
+
+
+@pytest.mark.spec("CRP-8")
+def test_crp_8_an_event_no_crop_holds_gets_null(monkeypatch, capsys, tmp_path):
+    run = run_crops(monkeypatch, capsys, tmp_path, result_r3())
+    assert run.rc == 0
+    data = manifest()
+    assert [event["crop"] for event in data["events"]] == [
+        {"n": 1, "file": "crops-01.png"}, {"n": 1, "file": "crops-01.png"}, None,
+    ]
+    assert data["crops"]["images"] == ["crops-01.png"]
+
+
+@pytest.mark.spec("CRP-8")
+def test_crp_8_an_empty_result_gives_empty_lists_and_null_crops(monkeypatch, capsys, tmp_path):
+    run = run_crops(monkeypatch, capsys, tmp_path, result_r4())
+    assert run.rc == 0
+    data = manifest()
+    assert data["crops"] == {"file": "crops.json", "images": [], "screens": []}
+    assert [event["crop"] for event in data["events"]] == [None, None, None]
+    assert all(list(event) == EVENTS_EVENT_KEYS + ["crop"] for event in data["events"])
+
+
+@pytest.mark.spec("CRP-8")
+def test_crp_8_screen_times_count_from_the_start_of_the_recording(monkeypatch, capsys, tmp_path):
+    run = run_crops(monkeypatch, capsys, tmp_path, result_r(), extra=["--from", "1"], probe=(3.0, 1600, 80))
+    assert run.rc == 0
+    assert manifest()["crops"]["screens"] == [{"n": 1, "from": 1.0, "file": SCREEN_FILE}]

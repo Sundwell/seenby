@@ -51,12 +51,17 @@ recording-frames/
   frame-02-0.50s.jpg
   ...
   sheet-01.jpg           contact sheets, within 1568 px on both sides, every tile under its number and time, changes boxed
+  crops-01.png           every change of screen 1 at native size, before and after, numbered as its box on the sheets
+  screen-01-0.00s.jpg    the full native frame of each screen as it starts
+  crops.json             the crops and screens: times, tile, region, a command that cuts each crop again
   frames.json            the manifest, see below
 ```
 
 Every tile of a sheet has a band above it with the frame's number and time, `#07 12.25s` for `frame-07-12.25s.jpg`, so a frame is cited and rechecked without counting tiles. The band is drawn with a built-in pixel font, so it needs nothing beyond ffmpeg itself; the frame files and `recheck` stay without it.
 
 On the default selector a change gets a magenta box on the first tile that shows it, a few pixels outside the changed area, so the eye goes straight to a 16 px checkbox on a 2120 px strip. The boxes come from the `region`s of `events` in `frames.json`, and a change gets one only where some 16x16 px of it changed clearly since the tile before, counted at full resolution: an area that changed and changed back in between (the pointer passing over it) and codec noise on text get none. Boxes closer than 6 px are joined into one, a box over more than half of the tile is dropped together with anything joined to it, and a tile with more than 12 separate boxes gets none. With options that put far more tiles on a sheet than the defaults, a sheet whose boxes would not fit on the Windows command line is drawn without them. So a tile without boxes can still hold changes; `events` lists them all. Like the band, the boxes are on the sheets only; the frame files and `recheck` stay clean for reading digits.
+
+A tile is a third of a wide screen or less, so a boxed change can be a few pixels of grey. The default selector therefore also cuts every change out at native size. `crops-NN.png` holds the changes of screen `NN`, each as a small block: a label such as `07 7.50>7.75>8.00 #12` (crop 7, the times of its pictures, on tile 12), and under it the same area before and after the change, 16 px of the screen kept around it. The number is also written in magenta next to the box on the sheet. Changes that settle in the same quarter second within 128 px of each other share a crop while it stays under a tenth of the frame; seenby does not guess rows, columns or cards. A picture in the middle is the frame the box is on when it shows something that is gone again in the picture after (a tooltip), or, when before and after look the same, the first state in between that does not; a change with no such state is left out and listed in `crops.json`. A change that redraws about a quarter of the frame or more starts a new screen instead of a crop, as do crops that add up to a quarter of it, and each screen gets its full native frame, `screen-NN-<t>s.jpg`: page text, headers and counters are read there without a command. A stretch between two redraws that lasts under a second and holds no crop (a step of a scroll) is not a screen. The legacy selector and a recording with one kept frame get no crops.
 
 The console says what happened and does not hide a bad outcome.
 
@@ -68,6 +73,8 @@ demo.mp4: 27.1 s, 814x872, portrait
   layout: window, tile 516 px, 3x2 per sheet
   contact sheets: demo-frames/sheet-01.jpg, demo-frames/sheet-02.jpg, demo-frames/sheet-03.jpg, demo-frames/sheet-04.jpg
   manifest: demo-frames/frames.json. Sheets are for meaning; read digits from the native frame, see "recheck" in the manifest.
+  crops, every change at native size before > after, numbered as on the sheets: demo-frames/crops-01.png, demo-frames/crops-02.png
+  screens, a full native frame of each screen as it starts, for reading text and digits: demo-frames/screen-01-0.00s.jpg, demo-frames/screen-02-9.00s.jpg; all listed in demo-frames/crops.json
 ```
 
 Here every change fit in 24 frames. When they do not, a line under the frames says how many were not shown, how many frames all of them would need, and which stretch to rerun with `--from/--to`, for example `151 of 272 changes not shown within 24 frames (all of them would need 131); 36 of them from 0.50 to 26.50 s: rerun with --from 0.00 --to 27.50` on a 20 minute concatenation of test recordings. When nothing changed, a line says so and counts the pointer-like moves (a radio button's dot jumping between options looks like the pointer). A one-cell-wide spot that keeps flipping between the same two looks, a text caret, is ignored and named with the stretch it blinked in; it does not cut short the text typed next to it, and a pointer move in the same moment still counts as the pointer. Exit codes are 0 done, 1 could not run (one line on stderr, no traceback), 2 bad arguments.
@@ -92,15 +99,18 @@ Here every change fit in 24 frames. When they do not, a line under the frames sa
   "sheets": [{"file": "sheet-01.jpg", "frames": [1, 6]}, {"file": "sheet-02.jpg", "frames": [7, 12]}, "..."],
   "segments": [{"n": 1, "from": 0.0, "to": 27.1, "frames": [1, 2, 3, "...", 24], "activity": 106}],
   "events": [
-    {"from": 1.0, "settled": 1.0, "until": 4.75, "region": [112, 224, 288, 72], "changed_px": 3120, "shown": true},
+    {"from": 1.0, "settled": 1.0, "until": 4.75, "region": [112, 224, 288, 72], "changed_px": 3120, "shown": true,
+     "crop": {"n": 1, "file": "crops-01.png"}},
     "..."
-  ]
+  ],
+  "crops": {"file": "crops.json", "images": ["crops-01.png", "crops-02.png"],
+            "screens": [{"n": 1, "from": 0.0, "file": "screen-01-0.00s.jpg"}, {"n": 2, "from": 9.0, "file": "screen-02-9.00s.jpg"}]}
 }
 ```
 
-Numbers in the file are full floats (`27.099892`), rounded here for reading. `reason` is why the frame was kept: `first`, `change` (the screen after a change settled), `state` (a short state inside a quick series, such as the first click of a double click, shown when the cap has room), `during` and `fill` (inside a long continuous change such as a scroll), `last`. `events` lists every change found. `settled` and `until` are the seconds its new state was on screen, `region` is `[x, y, w, h]` in native pixels (where to look on the frame), and `shown` says whether a kept frame shows it. `segments` index the frames by stretches of `--segment` seconds, with `activity`, the number of changes that settled in the stretch, so a reader of a long recording knows where to zoom in. Each frame's `recheck` extracts the very frame that was analysed, at full resolution.
+Numbers in the file are full floats (`27.099892`), rounded here for reading. `reason` is why the frame was kept: `first`, `change` (the screen after a change settled), `state` (a short state inside a quick series, such as the first click of a double click, shown when the cap has room), `during` and `fill` (inside a long continuous change such as a scroll), `last`. `events` lists every change found. `settled` and `until` are the seconds its new state was on screen, `region` is `[x, y, w, h]` in native pixels (where to look on the frame), and `shown` says whether a kept frame shows it. `crop` is the number and file of the crop that shows the change at native size, or `null` when it has none (it started a new screen, or it looked the same before and after); `crops` names the crop images and the full frame of each screen. Both keys are there only when crops were written. `segments` index the frames by stretches of `--segment` seconds, with `activity`, the number of changes that settled in the stretch, so a reader of a long recording knows where to zoom in. Each frame's `recheck` extracts the very frame that was analysed, at full resolution.
 
-**Reading rule.** Sheets are for meaning. A number read off a tile once came out as 118 instead of 218. For digits, run the frame's `recheck` command and read the native frame.
+**Reading rule.** Sheets are for meaning. A number read off a tile once came out as 118 instead of 218, and a counter of 36 as 34 on a 2560 px recording. For digits, read the crop of the change or the full frame of its screen, which are already on disk at native size, or run the frame's `recheck` command and read the native frame.
 
 ## Options
 

@@ -1029,6 +1029,7 @@ def crop_units(events, width, height, samples):
         if len(_cells(near)) * CELL * CELL > SCREEN_SHARE * full:
             if screens[-1]['start'] != k:
                 screens.append({'start': k, 'key': k, 'crops': []})
+            screens[-1]['key'] = k
             cells = set()
             continue
         got = _join([{'rect': [events[i]['x'], events[i]['y'], events[i]['w'], events[i]['h']], 'events': [i]}
@@ -1131,13 +1132,15 @@ def _pages(blocks, gap=12):
     return pages
 
 
-def write_crops(path, out_dir, screens, crops, tiles, width, height, fps=EVENT_FPS, start=0.0, length=None):
+def write_crops(path, out_dir, screens, crops, tiles, points, width, height, fps=EVENT_FPS, start=0.0, length=None):
     """Cut each crop of crop_units before and after its change at native size, and each screen's full frame, in one
     pass over the samples of change_grids; write crops-NN.png per screen, screen-NN-<time>s.jpg and crops.json.
 
-    `tiles` maps an event's index to the kept frame (from 0) whose box it got. A crop whose before and after look the
-    same (_looks_same) shows the first sample in between that does not, and is left out when there is none. Returns
-    the crops written, numbered from 1, the images and the number left out, or None when no sample was decoded.
+    `tiles` maps an event's index to the kept frame (from 0) whose box it got, `points` holds the sample of each kept
+    frame. Between before and after a crop shows the frame its box is on when that differs from both (_looks_same);
+    a crop whose before and after look the same shows the first sample in between that does not, and is left out
+    when there is none. Returns the crops written, numbered from 1, the images and the number left out, or None when
+    no sample was decoded.
     """
     need = {}
     for c in crops:
@@ -1184,12 +1187,15 @@ def write_crops(path, out_dir, screens, crops, tiles, width, height, fps=EVENT_F
         before, after = c['pics'].get(c['before']), c['pics'].get(c['after'])
         if after is None:
             continue
-        if before is not None and _looks_same(before, after):
-            c['passing'] = next((k for k in range(c['start'], c['settled'])
-                                 if k in c['pics'] and not _looks_same(before, c['pics'][k])), None)
-            if c['passing'] is None:
-                left.append(c)
-                continue
+        same = before is not None and _looks_same(before, after)
+        between = range(c['start'], c['settled'])
+        on_tile = [points[c['tile']]] if c['tile'] is not None and points[c['tile']] in between else []
+        c['passing'] = next((k for k in on_tile + (list(between) if same else [])
+                             if k in c['pics'] and not _looks_same(c['pics'][k], after)
+                             and (before is None or not _looks_same(before, c['pics'][k]))), None)
+        if same and c['passing'] is None:
+            left.append(c)
+            continue
         kept.append(c)
     for n, c in enumerate(kept, 1):
         c['n'] = n
@@ -1312,7 +1318,8 @@ def _run_events(args, out_dir, start, end, ranged, duration, width, height):
             stage = 'crops'
             screens, crops = crop_units(events, width, height, len(samples))
             try:
-                cut = write_crops(args.video, out_dir, screens, crops, tiles, width, height, EVENT_FPS, start, length)
+                cut = write_crops(args.video, out_dir, screens, crops, tiles, points, width, height, EVENT_FPS, start,
+                                  length)
             except (subprocess.CalledProcessError, OSError) as e:
                 print('  crops not written: %s' % e, file=sys.stderr)
             marks = [[] for _ in points]
@@ -1378,6 +1385,13 @@ def _run_events(args, out_dir, start, end, ranged, duration, width, height):
                     'until': start + e['until'] / EVENT_FPS, 'region': [e['x'], e['y'], e['w'], e['h']],
                     'changed_px': round(e['px']), 'shown': s} for e, s in zip(events, shown)],
     }
+    if cut:
+        of = {i: c for c in cut['crops'] for i in c['events']}
+        for i, e in enumerate(manifest['events']):
+            e['crop'] = {'n': of[i]['n'], 'file': of[i]['file']} if i in of else None
+        manifest['crops'] = {'file': 'crops.json', 'images': cut['images'],
+                             'screens': [{'n': s['n'], 'from': start + s['start'] / EVENT_FPS, 'file': s['file']}
+                                         for s in cut['screens']]}
     manifest_path = os.path.join(out_dir, 'frames.json')
     write_json(manifest_path, manifest)
 
@@ -1387,10 +1401,11 @@ def _run_events(args, out_dir, start, end, ranged, duration, width, height):
     print('  manifest: %s. Sheets are for meaning; read digits from the native frame, '
           'see "recheck" in the manifest.' % manifest_path)
     if cut:
-        print('  crops: %d changes at native size, before > after, numbered as on the sheets: %s; the full frame of '
-              'each of %d screens: screen-*.jpg; all listed in %s'
-              % (len(cut['crops']), ', '.join(os.path.join(out_dir, f) for f in cut['images']) or 'none',
-                 len(cut['screens']), os.path.join(out_dir, 'crops.json')))
+        named = lambda files: ', '.join(os.path.join(out_dir, f) for f in files) or 'none'
+        print('  crops, every change at native size before > after, numbered as on the sheets: %s'
+              % named(cut['images']))
+        print('  screens, a full native frame of each screen as it starts, for reading text and digits: %s; all listed '
+              'in %s' % (named(s['file'] for s in cut['screens']), os.path.join(out_dir, 'crops.json')))
     return 0
 
 
