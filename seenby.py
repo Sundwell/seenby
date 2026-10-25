@@ -85,6 +85,7 @@ CROP_MARGIN = 16     # px of the screen kept around a change in its crop
 CROP_JOIN = 128      # px, changes settling in the same sample closer than this share one crop
 CROP_SHARE = 0.1     # while that crop stays within this share of the frame
 SCREEN_SHARE = 0.25  # changes covering this share of the frame start a screen with a full frame of its own
+CROP_PAGES = 24      # crop pages of one run: an agent is told to read every one
 _SAMPLES = 'fps=%g:round=up:start_time=0'
 _GLYPHS = {
     '0': '01110 10001 10011 10101 11001 10001 01110', '1': '00100 01100 00100 00100 00100 00100 01110',
@@ -459,19 +460,25 @@ def events_of(content, joined=True):
     for k in range(1, len(content)):
         open_ = [e for e in open_ if e['end'] >= (k - 1 if joined else k)]
         for c in content[k]:
-            hit = [e for e in open_ if _overlaps(e, c, REGION_MARGIN)]
+            # a whole-frame box overlaps everything: past the sample after its last whole-frame change it would
+            # swallow every later change on the screen it brought, a dialog's whole use included
+            hit = [e for e in open_ if _overlaps(e, c, REGION_MARGIN)
+                   and (c['global'] or not e['global'] or e['wide'] >= k - 1)]
             if not hit:
-                e = dict(c, start=k, end=k)
+                e = dict(c, start=k, end=k, wide=k if c['global'] else None)
                 open_.append(e)
                 events.append(e)
                 continue
             e = hit[0]
             for o in hit[1:]:
+                e['wide'] = max(w for w in (e['wide'], o['wide'], -1) if w is not None)
                 _absorb(e, o)
                 open_.remove(o)
                 events.remove(o)
             _absorb(e, c)
             e['end'] = k
+            if c['global']:
+                e['wide'] = k
     last = len(content) - 1
     for e in events:
         e['settled'] = e['end']
@@ -764,7 +771,7 @@ def clean(out_dir):
     """
     for name in os.listdir(out_dir):
         ours = (name.startswith('frame-') or name.startswith('sheet') or name.startswith('screen-')) and \
-            name.endswith('.jpg') or name.startswith('crops-') and name.endswith('.png')
+            name.endswith('.jpg') or (name.startswith('crops-') or name.startswith('crop-')) and name.endswith('.png')
         if ours or name in ('frames.json', 'report.md', 'crops.json'):
             os.remove(os.path.join(out_dir, name))
 
@@ -777,7 +784,7 @@ def check_out_dir(out_dir, force):
     names = os.listdir(out_dir)
     if 'frames.json' in names:
         return None
-    for head, tail in (('frame-', '.jpg'), ('screen-', '.jpg'), ('crops-', '.png')):
+    for head, tail in (('frame-', '.jpg'), ('screen-', '.jpg'), ('crops-', '.png'), ('crop-', '.png')):
         if any(n.startswith(head) and n.endswith(tail) for n in names):
             return '%s already holds %s*%s from something else; pass --force to overwrite' % (out_dir, head, tail)
     return None
@@ -967,7 +974,7 @@ def contact_sheets(paths, out_dir, cols, rows, boxes=None, marks=None):
                              'stream=width,height,pix_fmt', '-of', 'csv=p=0', paths[0]],
                             capture_output=True, text=True, check=True).stdout.strip().split(',')
     if len(probed) != 3 or not probed[0].isdigit() or not probed[1].isdigit():
-        raise ValueError('ffprobe could not read the frame width of %s' % paths[0])
+        raise ValueError('ffprobe could not read the size and pixel format of %s' % paths[0])
     width, tile_height, fmt = int(probed[0]), int(probed[1]), probed[2]
     per_sheet = cols * rows
     sheets = []
@@ -1047,6 +1054,13 @@ def _join(units, limit):
     return units
 
 
+def _moments(events):
+    moments = {}
+    for i, e in enumerate(events):
+        moments.setdefault(e['settled'], []).append(i)
+    return moments
+
+
 def crop_units(events, width, height, samples):
     """The screens of a recording and the crops of its changes, from the events of select_events: (screens, crops).
 
@@ -1058,9 +1072,7 @@ def crop_units(events, width, height, samples):
     """
     full = width * height
     d = CROP_JOIN // 2
-    moments = {}
-    for i, e in enumerate(events):
-        moments.setdefault(e['settled'], []).append(i)
+    moments = _moments(events)
     screens = [{'start': 0, 'key': 0, 'crops': []}]
     cells = set()
     for k in sorted(moments):
@@ -1186,7 +1198,8 @@ def _pages(blocks, gap=12):
 def write_crops(path, out_dir, screens, crops, tiles, points, width, height, fps=EVENT_FPS, start=0.0, length=None):
     """Cut each crop of crop_units before and after its change at native size, and each screen's full frame, in one
     pass over the samples of change_grids; write crops-NN.png per screen (crops-NN-02.png its second page),
-    screen-NN-<time>s.jpg and crops.json.
+    screen-NN-<time>s.jpg and crops.json. After CROP_PAGES pages no more are written: the crops they would hold are
+    listed in crops.json as not drawn and counted in the result's `over`.
 
     `tiles` maps an event's index to the kept frame (from 0) whose box it got, `points` holds the sample of each kept
     frame. Between before and after a crop shows the frame its box is on when that differs from both (looks_same);
@@ -1262,11 +1275,17 @@ def write_crops(path, out_dir, screens, crops, tiles, points, width, height, fps
         kept.append(c)
     for n, c in enumerate(kept, 1):
         c['n'] = n
-    images = []
+    images, over = [], []
     for s in screens:
         s['images'] = []
         mine = [c for c in kept if c['screen'] == s['n']]
+        if len(images) == CROP_PAGES:
+            over += mine
+            continue
         for p_, (w, h, rows, ids) in enumerate(_pages([_crop_block(c, fps, start) for c in mine])):
+            if len(images) == CROP_PAGES:
+                over += [mine[i] for i in ids]
+                continue
             name = 'crops-%02d%s.png' % (s['n'], '-%02d' % (p_ + 1) if p_ else '')
             subprocess.run([ffmpeg(), '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '%dx%d' % (w, h),
                             '-i', '-', os.path.join(out_dir, name)], input=b''.join(rows), capture_output=True,
@@ -1283,18 +1302,41 @@ def write_crops(path, out_dir, screens, crops, tiles, points, width, height, fps
             passthrough(version), 'passthrough', '-frames:v', '1', os.path.join(out_dir, name)])
 
     t = lambda k: None if k is None else start + k / fps
+    recrop = lambda c: {
+        'recrop_before': None if c['before'] is None else cut(c['before'], c['crop'], 'crop-%02d-before.png' % c['n']),
+        'recrop_passing': None if c.get('passing') is None else
+        cut(c['passing'], c['crop'], 'crop-%02d-passing.png' % c['n']),
+        'recrop_after': cut(c['after'], c['crop'], 'crop-%02d-after.png' % c['n'])}
+    kept = [c for c in kept if 'file' in c]
     write_json(os.path.join(out_dir, 'crops.json'), {
         'screens': [{'n': s['n'], 'from': t(s['start']), 'full_frame': s.get('file'), 'crops': s['images']}
                     for s in screens],
         'crops': [{'n': c['n'], 'screen': c['screen'], 'tile': None if c['tile'] is None else c['tile'] + 1,
                    'file': c['file'], 'before': t(c['before']), 'passing': t(c.get('passing')), 'after': t(c['after']),
-                   'region': c['rect'], 'crop': c['crop'],
-                   'recrop_before': None if c['before'] is None else
-                   cut(c['before'], c['crop'], 'crop-%02d-before.png' % c['n']),
-                   'recrop_after': cut(c['after'], c['crop'], 'crop-%02d-after.png' % c['n'])} for c in kept],
+                   'region': c['rect'], 'crop': c['crop'], **recrop(c)} for c in kept],
         'left_out': [{'before': t(c['before']), 'after': t(c['after']), 'region': c['rect']} for c in left],
+        'not_drawn': [{'before': t(c['before']), 'passing': t(c.get('passing')), 'after': t(c['after']),
+                       'region': c['rect'], 'crop': c['crop'], **recrop(c)} for c in over],
     })
-    return {'crops': kept, 'images': images, 'screens': [s for s in screens if s.get('file')], 'left': len(left)}
+    return {'crops': kept, 'images': images, 'screens': [s for s in screens if s.get('file')], 'left': len(left),
+            'over': (len(over), t(over[0]['after']), t(over[-1]['after'])) if over else None}
+
+
+def _ranges(ns):
+    """'3, 5-7' for [3, 5, 6, 7]."""
+    out = []
+    for n in sorted(ns):
+        if out and out[-1][1] == n - 1:
+            out[-1][1] = n
+        else:
+            out.append([n, n])
+    return ', '.join('%d' % a if a == b else '%d-%d' % (a, b) for a, b in out)
+
+
+def _last_line(e):
+    """The last line ffmpeg wrote to stderr before a CalledProcessError, as a list of one or none."""
+    err = e.stderr.decode(errors='replace') if isinstance(e.stderr, bytes) else (e.stderr or '')
+    return err.strip().splitlines()[-1:]
 
 
 def _run_events(args, out_dir, start, end, ranged, duration, width, height):
@@ -1366,25 +1408,46 @@ def _run_events(args, out_dir, start, end, ranged, duration, width, height):
         cut = None
         if len(paths) > 1:
             changes = kept_changes(args.video, points, width, height, EVENT_FPS, start, length)
-            regions = [[] for _ in points]
             tiles = {}
             for j, e in enumerate(events):
                 for i in range(max(1, bisect.bisect_left(points, e['start'])), len(points)):
                     if points[i] > e['until']:
                         break
                     if _visible(e, changes[i], gw):
-                        regions[i].append([e['x'], e['y'], e['w'], e['h']])
                         tiles[j] = i
                         break
-            tile_height = (tile_width * height + width // 2) // width
-            boxes = [change_boxes(r, width, tile_width, tile_height) for r in regions]
+            screens = []
             # the crops are an addition: whatever fails in them, the sheets and the manifest are still written
             try:
                 screens, crops = crop_units(events, width, height, len(samples))
                 cut = write_crops(args.video, out_dir, screens, crops, tiles, points, width, height, EVENT_FPS, start,
                                   length)
             except Exception as e:
-                print('  crops not written: %s' % (str(e) or type(e).__name__), file=sys.stderr)
+                if isinstance(e, subprocess.CalledProcessError):
+                    why = 'ffmpeg failed (exit %d)' % e.returncode + ''.join(': ' + line for line in _last_line(e))
+                else:
+                    why = type(e).__name__ + (': %s' % e if str(e) else '')
+                print('  crops not written: %s' % why, file=sys.stderr)
+                # what the step wrote before it failed is named nowhere and numbered as nothing on the sheets
+                for name in os.listdir(out_dir):
+                    if name == 'crops.json' or name.startswith('screen-') and name.endswith('.jpg') \
+                            or name.startswith('crops-') and name.endswith('.png'):
+                        try:
+                            os.remove(os.path.join(out_dir, name))
+                        except OSError:
+                            pass
+            # a moment spread over the frame starts a screen whose full frame shows it; its pieces left as boxes
+            # pointed at the wrong place. A screen dropped as a transition has no file, so its moment keeps them.
+            kept = {k for s in screens for k in (s['start'], s['key'])}
+            whole = {j for k, ids in _moments(events).items() if k in kept
+                     and len(_cells([[events[j][key] for key in 'xywh'] for j in ids])) * CELL * CELL
+                     > SCREEN_SHARE * width * height for j in ids}
+            regions = [[] for _ in points]
+            for j, i in tiles.items():
+                if j not in whole:
+                    regions[i].append([events[j][key] for key in 'xywh'])
+            tile_height = (tile_width * height + width // 2) // width
+            boxes = [change_boxes(r, width, tile_width, tile_height) for r in regions]
             of = {j: c['n'] for c in (cut or {}).get('crops', []) for j in c['events']}
             marks = []
             for i, on in enumerate(boxes):
@@ -1406,9 +1469,7 @@ def _run_events(args, out_dir, start, end, ranged, duration, width, height):
     except ValueError as e:
         return fail('%s: %s' % (args.video, e))
     except subprocess.CalledProcessError as e:
-        err = e.stderr.decode(errors='replace') if isinstance(e.stderr, bytes) else (e.stderr or '')
-        lines = err.strip().splitlines()
-        return fail('ffmpeg failed during %s (exit %d): %s' % (stage, e.returncode, lines[-1] if lines else ''))
+        return fail('ffmpeg failed during %s (exit %d): %s' % (stage, e.returncode, ''.join(_last_line(e))))
 
     per_sheet = cols * rows
     settled = [start + e['settled'] / EVENT_FPS for e in events]
@@ -1456,6 +1517,8 @@ def _run_events(args, out_dir, start, end, ranged, duration, width, height):
         manifest['crops'] = {'file': 'crops.json', 'images': cut['images'],
                              'screens': [{'n': s['n'], 'from': start + s['start'] / EVENT_FPS, 'file': s['file']}
                                          for s in cut['screens']]}
+        if cut.get('over'):
+            manifest['crops']['not_drawn'] = dict(zip(('count', 'from', 'to'), cut['over']))
     manifest_path = os.path.join(out_dir, 'frames.json')
     write_json(manifest_path, manifest)
 
@@ -1466,8 +1529,17 @@ def _run_events(args, out_dir, start, end, ranged, duration, width, height):
           'see "recheck" in the manifest.' % manifest_path)
     if cut:
         named = lambda files: ', '.join(os.path.join(out_dir, f) for f in files) or 'none'
-        print('  crops, every change at native size before > after, numbered as on the sheets: %s'
-              % named(cut['images']))
+        held = {}
+        for c in cut['crops']:
+            held.setdefault(c['file'], []).append(c['n'])
+        listed = [os.path.join(out_dir, f) + (' (%s)' % _ranges(held[f]) if f in held else '') for f in cut['images']]
+        print('  crops, every change at native size before > after, numbered as on the sheets, the numbers each '
+              'file holds in brackets: %s' % (', '.join(listed) or 'none'))
+        if cut.get('over'):
+            count, first, last = cut['over']
+            print('  %d of %d crops not drawn within %d pages, those from %.2f to %.2f s: rerun with --from %.2f '
+                  '--to %.2f' % (count, count + len(cut['crops']), CROP_PAGES, first, last, max(start, first - 1.0),
+                                 math.floor(min(end, last + 1.0) * 100 + 1e-6) / 100))
         print('  screens, a full native frame of each screen as it starts, for reading text and digits: %s; all listed '
               'in %s' % (named(s['file'] for s in cut['screens']), os.path.join(out_dir, 'crops.json')))
     return 0
@@ -1513,8 +1585,8 @@ def main():
     p.add_argument('--dry-run', action='store_true',
                    help='print the selected times and the layout, extract nothing')
     p.add_argument('--force', action='store_true',
-                   help='overwrite an output directory that holds frame-*.jpg, screen-*.jpg or crops-*.png from '
-                        'something else')
+                   help='overwrite an output directory that holds frame-*.jpg, screen-*.jpg, crops-*.png or '
+                        'crop-*.png from something else')
     args = p.parse_args()
     legacy_only = any(v is not None for v in (args.threshold, args.max_gap, args.block_k, args.sample_fps))
     if args.selector == 'events' and legacy_only:
@@ -1646,9 +1718,7 @@ def main():
     except ValueError as e:
         return fail('%s: %s' % (args.video, e))
     except subprocess.CalledProcessError as e:
-        err = e.stderr.decode(errors='replace') if isinstance(e.stderr, bytes) else (e.stderr or '')
-        lines = err.strip().splitlines()
-        return fail('ffmpeg failed during %s (exit %d): %s' % (stage, e.returncode, lines[-1] if lines else ''))
+        return fail('ffmpeg failed during %s (exit %d): %s' % (stage, e.returncode, ''.join(_last_line(e))))
 
     per_sheet = cols * rows
     all_timer = len(frames) >= 5 and not any(f['reason'] in ('diff', 'block') for f in frames)

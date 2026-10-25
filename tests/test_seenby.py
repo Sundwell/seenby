@@ -6670,6 +6670,7 @@ def test_crp_3_label_band_draws_the_arrow_glyph():
 
 
 @pytest.mark.spec("CRP-7")
+@pytest.mark.spec("CRP-20")
 def test_crp_7_removes_screens_crops_and_crops_json_only(tmp_path):
     names = [
         "screen-01-0.00s.jpg", "screen-02-12.25s.jpg", "crops-01.png", "crops-01b.png", "crops.json", "crops-01.jpg",
@@ -6678,7 +6679,7 @@ def test_crp_7_removes_screens_crops_and_crops_json_only(tmp_path):
     populate(tmp_path, names)
     seenby.clean(tmp_path)
     assert sorted(os.listdir(tmp_path)) == [
-        "Screen-01.jpg", "crop-01-before.png", "crops-01.jpg", "crops.json.tmp", "screen.jpg",
+        "Screen-01.jpg", "crops-01.jpg", "crops.json.tmp", "screen.jpg",
     ]
 
 
@@ -6691,7 +6692,10 @@ SCREEN_FILE = "screen-01-0.00s.jpg"
 
 
 def lc(files):
-    return f"  crops, every change at native size before > after, numbered as on the sheets: {files}"
+    return (
+        "  crops, every change at native size before > after, numbered as on the sheets, "
+        f"the numbers each file holds in brackets: {files}"
+    )
 
 
 def ls(files):
@@ -6770,25 +6774,27 @@ def test_crp_6_write_crops_gets_the_units_the_tiles_and_the_sample_points(monkey
 
 
 @pytest.mark.spec("CRP-6")
+@pytest.mark.spec("CRP-24")
 def test_crp_6_a_result_puts_numbered_marks_on_the_tiles_and_names_the_files(monkeypatch, capsys, tmp_path):
     run = run_crops(monkeypatch, capsys, tmp_path, result_r())
     assert run.rc == 0
     assert run.contact_sheets_arity == [6]
     assert run.contact_sheets_marks == [[[], [(64, 2, "02")], [(25, 2, "03")]]]
     assert run.out.splitlines()[-3:] == [
-        MANIFEST_LINE.format(out_dir="out"), lc("out/crops-01.png"), ls("out/screen-01-0.00s.jpg"),
+        MANIFEST_LINE.format(out_dir="out"), lc("out/crops-01.png (1-3)"), ls("out/screen-01-0.00s.jpg"),
     ]
     assert run.err == ""
 
 
 @pytest.mark.spec("CRP-6")
+@pytest.mark.spec("CRP-24")
 def test_crp_6_a_result_without_any_box_gives_no_marks_and_names_every_page_and_screen(monkeypatch, capsys, tmp_path):
     run = run_crops(monkeypatch, capsys, tmp_path, result_r2(), changes=None)
     assert run.rc == 0
     assert run.contact_sheets_arity == [5]
     assert run.contact_sheets_marks == [None]
     assert run.out.splitlines()[-2:] == [
-        lc("out/crops-01.png, out/crops-01b.png, out/crops-02.png"),
+        lc("out/crops-01.png (1), out/crops-01b.png (2), out/crops-02.png (3)"),
         ls("out/screen-01-0.00s.jpg, out/screen-02-1.00s.jpg"),
     ]
 
@@ -6797,11 +6803,12 @@ def test_crp_6_a_result_without_any_box_gives_no_marks_and_names_every_page_and_
 @pytest.mark.parametrize(
     "result, crops_line, screens_line",
     [
-        (result_r3, "out/crops-01.png", "out/screen-01-0.00s.jpg"),
+        (result_r3, "out/crops-01.png (1)", "out/screen-01-0.00s.jpg"),
         (result_r4, "none", "none"),
     ],
     ids=["crop-without-a-tile-and-no-box", "nothing-written"],
 )
+@pytest.mark.spec("CRP-24")
 def test_crp_6_without_a_box_on_any_frame_the_sheets_get_no_marks(
     monkeypatch, capsys, tmp_path, result, crops_line, screens_line
 ):
@@ -6817,14 +6824,18 @@ def test_crp_6_without_a_box_on_any_frame_the_sheets_get_no_marks(
 @pytest.mark.parametrize(
     "error, message",
     [
-        (OSError(2, "No such file or directory"), "  crops not written: [Errno 2] No such file or directory\n"),
+        (
+            OSError(2, "No such file or directory"),
+            "  crops not written: FileNotFoundError: [Errno 2] No such file or directory\n",
+        ),
         (
             subprocess.CalledProcessError(1, ["ffmpeg"]),
-            "  crops not written: Command '['ffmpeg']' returned non-zero exit status 1.\n",
+            "  crops not written: ffmpeg failed (exit 1)\n",
         ),
     ],
     ids=["oserror", "called-process-error"],
 )
+@pytest.mark.spec("CRP-19")
 def test_crp_6_a_failing_write_crops_is_reported_and_the_run_goes_on(monkeypatch, capsys, tmp_path, error, message):
     run = run_crops(monkeypatch, capsys, tmp_path, error, changes=None)
     assert run.rc == 0
@@ -7290,11 +7301,12 @@ def test_crp_13_one_box_names_all_the_crops_of_its_events_as_runs(monkeypatch, c
 
 
 @pytest.mark.spec("CRP-13")
+@pytest.mark.spec("CRP-24")
 def test_crp_13_numbers_that_are_not_consecutive_stay_apart_and_the_pages_are_named(monkeypatch, capsys, tmp_path):
     run = run_crops(monkeypatch, capsys, tmp_path, result_r6(), probe=VERY_WIDE_PROBE)
     assert run.rc == 0
     assert run.contact_sheets_marks == [[[], [(35, 0, "04 06")], [(15, 0, "12")]]]
-    assert run.out.splitlines()[-2:] == [lc("out/crops-01.png, out/crops-01-02.png"), ls("out/screen-01-0.00s.jpg")]
+    assert run.out.splitlines()[-2:] == [lc("out/crops-01.png (4, 6), out/crops-01-02.png (12)"), ls("out/screen-01-0.00s.jpg")]
     assert [event["crop"] for event in manifest()["events"]] == [
         {"n": 4, "file": "crops-01.png"}, {"n": 6, "file": "crops-01.png"}, {"n": 12, "file": "crops-01-02.png"},
     ]
@@ -7329,11 +7341,12 @@ def test_crp_13_without_a_number_or_a_box_the_sheets_get_five_arguments(
     "error, message",
     [
         (MemoryError(), "  crops not written: MemoryError\n"),
-        (RuntimeError("boom"), "  crops not written: boom\n"),
-        (KeyError("x"), "  crops not written: 'x'\n"),
+        (RuntimeError("boom"), "  crops not written: RuntimeError: boom\n"),
+        (KeyError("x"), "  crops not written: KeyError: 'x'\n"),
     ],
     ids=["memory-error-has-no-text", "runtime-error", "key-error"],
 )
+@pytest.mark.spec("CRP-19")
 def test_crp_13_any_exception_of_write_crops_is_reported_and_the_run_goes_on(
     monkeypatch, capsys, tmp_path, error, message
 ):
@@ -7349,6 +7362,7 @@ def test_crp_13_any_exception_of_write_crops_is_reported_and_the_run_goes_on(
 
 
 @pytest.mark.spec("CRP-13")
+@pytest.mark.spec("CRP-19")
 def test_crp_13_a_failing_crop_units_is_reported_and_write_crops_is_not_called(monkeypatch, capsys, tmp_path):
     def broken(events, width, height, samples):
         raise KeyError("x")
@@ -7356,7 +7370,7 @@ def test_crp_13_a_failing_crop_units_is_reported_and_write_crops_is_not_called(m
     monkeypatch.setattr(seenby, "crop_units", broken)
     run = run_crops(monkeypatch, capsys, tmp_path, result_r())
     assert run.rc == 0
-    assert run.err == "  crops not written: 'x'\n"
+    assert run.err == "  crops not written: KeyError: 'x'\n"
     assert run.write_crops_calls == []
     assert run.contact_sheets_arity == [5]
     assert run.out.splitlines()[-1] == MANIFEST_LINE.format(out_dir="out")
@@ -7645,3 +7659,329 @@ def test_crp_18_the_analysed_width_is_the_native_width_of_the_grid_on_a_narrow_t
     assert run.rc == 0
     assert run.contact_sheets_boxes == [[[], [(2, 2, 23, 23), (41, 2, 23, 23)], [(2, 2, 23, 23)]]]
     assert run.contact_sheets_marks == [expected]
+
+
+# ---------------------------------------------------------------- Step 19: the open points of the crops review
+
+# -------- CRP-19 (the stderr line of a failing crops stage, and the cleanup after it)
+
+CROPS_ERROR_ROWS = [
+    (OSError(2, "No such file or directory"), "  crops not written: FileNotFoundError: [Errno 2] No such file or directory\n"),
+    (subprocess.CalledProcessError(1, ["ffmpeg"]), "  crops not written: ffmpeg failed (exit 1)\n"),
+    (
+        subprocess.CalledProcessError(234, ["ffmpeg"], stderr=b"first line\nConversion failed!\n"),
+        "  crops not written: ffmpeg failed (exit 234): Conversion failed!\n",
+    ),
+    (
+        subprocess.CalledProcessError(1, ["ffmpeg"], stderr="Invalid argument\n\n"),
+        "  crops not written: ffmpeg failed (exit 1): Invalid argument\n",
+    ),
+    (MemoryError(), "  crops not written: MemoryError\n"),
+    (RuntimeError("boom"), "  crops not written: RuntimeError: boom\n"),
+    (KeyError("x"), "  crops not written: KeyError: 'x'\n"),
+    (ValueError("ffmpeg wrote 2 of 3 frames"), "  crops not written: ValueError: ffmpeg wrote 2 of 3 frames\n"),
+    (
+        subprocess.CalledProcessError(7, ["ffmpeg"], stderr=b"  \n\t\n"),
+        "  crops not written: ffmpeg failed (exit 7)\n",
+    ),
+    (
+        subprocess.CalledProcessError(7, ["ffmpeg"], stderr=b"bad \xff byte\n"),
+        "  crops not written: ffmpeg failed (exit 7): bad � byte\n",
+    ),
+]
+CROPS_ERROR_IDS = [
+    "oserror-names-its-type", "no-stderr", "bytes-last-line", "str-stripped", "memory-error", "runtime-error",
+    "key-error", "value-error", "blank-stderr-is-empty", "undecodable-byte-replaced",
+]
+
+
+@pytest.mark.spec("CRP-19")
+@pytest.mark.parametrize("error, message", CROPS_ERROR_ROWS, ids=CROPS_ERROR_IDS)
+def test_crp_19_the_stderr_line_names_the_type_or_the_ffmpeg_exit_and_its_last_line(
+    monkeypatch, capsys, tmp_path, error, message
+):
+    run = run_crops(monkeypatch, capsys, tmp_path, error)
+    assert run.rc == 0
+    assert run.err == message
+    assert "crops" not in manifest()
+
+
+@pytest.mark.spec("CRP-19")
+def test_crp_19_a_failing_stage_removes_the_crop_files_and_leaves_everything_else(monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "clip.mp4").write_bytes(b"")
+    run = Run(
+        monkeypatch, WIDE_PROBE, static(4), None, None, None, None, samples=events_two(), changes=TWO_CHANGES,
+        crops=None,
+    )
+
+    def save_samples(path, indices, times, out_dir, tile_width, fps=4, start=0.0, length=None):
+        os.makedirs(out_dir, exist_ok=True)
+        names = [f"{out_dir}/frame-{i:02d}.jpg" for i in range(1, len(indices) + 1)]
+        for name in names:
+            (tmp_path / name).write_bytes(b"x")
+        return names
+
+    def write_crops(*args, **kwargs):
+        for name in [
+            "screen-01-0.00s.jpg", "crops-01.png", "crops-01-02.png", "crops.json", "crops-01.jpg", "screen.jpg",
+            "notes.txt", "crop-01-before.png",
+        ]:
+            (tmp_path / "out" / name).write_bytes(b"x")
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(seenby, "save_samples", save_samples)
+    monkeypatch.setattr(seenby, "write_crops", write_crops)
+    monkeypatch.setattr(sys, "argv", ["seenby.py", "clip.mp4", "out", "--selector", "events", "--force"])
+    rc = seenby.main()
+    assert rc == 0
+    assert capsys.readouterr().err == "  crops not written: RuntimeError: boom\n"
+    assert sorted(os.listdir(tmp_path / "out")) == [
+        "crop-01-before.png", "crops-01.jpg", "frame-01.jpg", "frame-02.jpg", "frame-03.jpg", "frames.json",
+        "notes.txt", "screen.jpg",
+    ]
+
+
+# -------- CRP-20 (clean also removes crop-*.png; check_out_dir takes four patterns)
+
+
+@pytest.mark.spec("CRP-20")
+def test_crp_20_clean_removes_the_recrop_files_with_the_rest_of_the_crops(tmp_path):
+    populate(tmp_path, [
+        "screen-01-0.00s.jpg", "screen-02-12.25s.jpg", "crops-01.png", "crops-01b.png", "crops.json", "crops-01.jpg",
+        "screen.jpg", "Screen-01.jpg", "crop-01-before.png", "crop-01-after.png", "crop-12-passing.png",
+        "crop-01-before.jpg", "Crop-01-before.png", "crop.png", "crops.json.tmp",
+    ])
+    seenby.clean(tmp_path)
+    assert sorted(os.listdir(tmp_path)) == [
+        "Crop-01-before.png", "Screen-01.jpg", "crop-01-before.jpg", "crop.png", "crops-01.jpg", "crops.json.tmp",
+        "screen.jpg",
+    ]
+
+
+CROP_FOLDERS = [
+    (["crop-of-wheat.png"], "crop-*.png"),
+    (["crop-01-before.png", "frames.json"], None),
+    (["crops-01.png", "crop-01-before.png"], "crops-*.png"),
+    (["crop.png", "crop-01.jpg", "Crop-01.png"], None),
+    (["frame-01.jpg", "crop-01-before.png"], "frame-*.jpg"),
+]
+
+
+@pytest.mark.spec("CRP-20")
+@pytest.mark.parametrize("force", [False, True], ids=["no-force", "force"])
+@pytest.mark.parametrize(
+    "names, pattern", CROP_FOLDERS, ids=["wheat", "ours-with-a-manifest", "crops-before-crop", "no-match", "frame-first"]
+)
+def test_crp_20_check_out_dir_refuses_foreign_recrops_in_the_order_of_four_patterns(tmp_path, names, pattern, force):
+    populate(tmp_path, names)
+    d = str(tmp_path)
+    expected = None if force or pattern is None else f"{d} already holds {pattern} from something else; pass --force to overwrite"
+    assert seenby.check_out_dir(d, force) == expected
+
+
+# -------- CRP-21 (main(): the line and the manifest key for the crops not drawn within CROP_PAGES)
+
+NOT_DRAWN_PROBE = (40.0, 1600, 80)
+
+
+def over_result(over):
+    return dict(result_r(), over=over)
+
+
+@pytest.mark.spec("CRP-21")
+def test_crp_21_the_page_cap_is_24():
+    assert seenby.CROP_PAGES == 24
+
+
+@pytest.mark.spec("CRP-21")
+def test_crp_21_not_drawn_crops_get_a_console_line_and_a_manifest_key(monkeypatch, capsys, tmp_path):
+    run = run_crops(monkeypatch, capsys, tmp_path, over_result((5, 20.25, 31.5)), probe=NOT_DRAWN_PROBE)
+    assert run.rc == 0
+    assert run.out.splitlines()[-3:] == [
+        lc("out/crops-01.png (1-3)"),
+        "  5 of 8 crops not drawn within 24 pages, those from 20.25 to 31.50 s: rerun with --from 19.25 --to 32.50",
+        ls("out/screen-01-0.00s.jpg"),
+    ]
+    assert manifest()["crops"] == {
+        "file": "crops.json",
+        "images": ["crops-01.png"],
+        "screens": [{"n": 1, "from": 0.0, "file": "screen-01-0.00s.jpg"}],
+        "not_drawn": {"count": 5, "from": 20.25, "to": 31.5},
+    }
+
+
+@pytest.mark.spec("CRP-21")
+@pytest.mark.parametrize(
+    "over, extra, line, not_drawn",
+    [
+        (
+            (2, 0.5, 39.75), [],
+            "  2 of 5 crops not drawn within 24 pages, those from 0.50 to 39.75 s: rerun with --from 0.00 --to 40.00",
+            {"count": 2, "from": 0.5, "to": 39.75},
+        ),
+        (
+            (1, 12.0, 12.0), [],
+            "  1 of 4 crops not drawn within 24 pages, those from 12.00 to 12.00 s: rerun with --from 11.00 --to 13.00",
+            {"count": 1, "from": 12.0, "to": 12.0},
+        ),
+        (
+            (3, 10.25, 11.5), ["--from", "10", "--to", "12"],
+            "  3 of 6 crops not drawn within 24 pages, those from 10.25 to 11.50 s: rerun with --from 10.00 --to 12.00",
+            {"count": 3, "from": 10.25, "to": 11.5},
+        ),
+    ],
+    ids=["clamped-to-the-whole-recording", "one-crop", "clamped-to-the-analysed-range"],
+)
+def test_crp_21_the_rerun_range_is_clamped_to_the_analysed_range(
+    monkeypatch, capsys, tmp_path, over, extra, line, not_drawn
+):
+    run = run_crops(monkeypatch, capsys, tmp_path, over_result(over), extra=extra, probe=NOT_DRAWN_PROBE)
+    assert run.rc == 0
+    assert run.out.splitlines()[-2] == line
+    assert run.out.splitlines()[-3] == lc("out/crops-01.png (1-3)")
+    assert manifest()["crops"]["not_drawn"] == not_drawn
+
+
+@pytest.mark.spec("CRP-21")
+@pytest.mark.parametrize("result", [over_result(None), result_r()], ids=["over-none", "no-over-key"])
+def test_crp_21_nothing_over_gives_no_line_and_no_manifest_key(monkeypatch, capsys, tmp_path, result):
+    run = run_crops(monkeypatch, capsys, tmp_path, result, probe=NOT_DRAWN_PROBE)
+    assert run.rc == 0
+    assert run.out.splitlines()[-2:] == [lc("out/crops-01.png (1-3)"), ls("out/screen-01-0.00s.jpg")]
+    assert "not_drawn" not in manifest()["crops"]
+
+
+# -------- CRP-24 (the crops line names the numbers each page holds)
+
+
+def seven_crops_result():
+    first = result_r()["crops"][0]
+    pages = [(1, "crops-01.png"), (2, "crops-01.png"), (3, "crops-01-02.png"), (4, "crops-01.png"),
+             (5, "crops-01.png"), (6, "crops-01.png"), (8, "crops-01.png")]
+    return dict(
+        result_r(),
+        crops=[dict(first, n=n, file=file) for n, file in pages],
+        images=["crops-01.png", "crops-01-02.png", "crops-02.png"],
+    )
+
+
+@pytest.mark.spec("CRP-24")
+@pytest.mark.parametrize(
+    "result, files",
+    [
+        (result_r2, "out/crops-01.png (1), out/crops-01b.png (2), out/crops-02.png (3)"),
+        (
+            seven_crops_result,
+            "out/crops-01.png (1-2, 4-6, 8), out/crops-01-02.png (3), out/crops-02.png",
+        ),
+    ],
+    ids=["one-number-per-page", "runs-joined-and-an-empty-page-without-brackets"],
+)
+def test_crp_24_the_crops_line_gives_the_numbers_each_file_holds(monkeypatch, capsys, tmp_path, result, files):
+    run = run_crops(monkeypatch, capsys, tmp_path, result())
+    assert run.rc == 0
+    assert run.out.splitlines()[-2] == lc(files)
+
+
+# -------- CRP-25 (events_of: a whole-frame event takes the pair after its last whole-frame change, no later ones)
+
+GLOBAL_BLOB = blob(0, 0, 160, 80, 5000.0, True)
+EVENT_ROW_KEYS = ["start", "end", "settled", "until", "x", "y", "w", "h", "px", "global"]
+
+
+def as_rows(events):
+    return [dict(zip(EVENT_ROW_KEYS, row)) for row in events]
+
+
+@pytest.mark.spec("CRP-25")
+@pytest.mark.parametrize(
+    "content, joined, expected",
+    [
+        (
+            [[], [GLOBAL_BLOB], [blob(16, 16)], [blob(16, 16)], []], True,
+            [(1, 2, 2, 2, 0, 0, 160, 80, 5300.0, True), (3, 3, 3, 4, 16, 16, 24, 32, 300.0, False)],
+        ),
+        (
+            [[], [GLOBAL_BLOB], [GLOBAL_BLOB], [blob(16, 16)], [blob(40, 16)], []], True,
+            [(1, 3, 3, 3, 0, 0, 160, 80, 10300.0, True), (4, 4, 4, 5, 40, 16, 24, 32, 300.0, False)],
+        ),
+        (
+            [[], [blob(16, 16)], [GLOBAL_BLOB], [blob(16, 16)], [blob(16, 16)], []], True,
+            [(1, 3, 3, 3, 0, 0, 160, 80, 5600.0, True), (4, 4, 4, 5, 16, 16, 24, 32, 300.0, False)],
+        ),
+        (
+            [[], [GLOBAL_BLOB], [blob(16, 16)], [blob(16, 16)], [GLOBAL_BLOB], []], True,
+            [(1, 2, 2, 2, 0, 0, 160, 80, 5300.0, True), (3, 4, 4, 5, 0, 0, 160, 80, 5300.0, True)],
+        ),
+        (
+            [[], [GLOBAL_BLOB], [blob(16, 16)], [blob(16, 16)], []], False,
+            [
+                (1, 1, 1, 1, 0, 0, 160, 80, 5000.0, True),
+                (2, 2, 2, 2, 16, 16, 24, 32, 300.0, False),
+                (3, 3, 3, 4, 16, 16, 24, 32, 300.0, False),
+            ],
+        ),
+    ],
+    ids=[
+        "small-changes-after-the-pair-after-start-their-own-event",
+        "a-second-whole-frame-pair-extends-the-reach",
+        "a-global-blob-absorbs-the-open-event-and-counts-from-its-own-pair",
+        "a-later-global-blob-absorbs-the-open-small-event",
+        "not-joined",
+    ],
+)
+def test_crp_25_a_whole_frame_event_takes_only_the_pair_after_its_last_whole_frame_change(
+    content, joined, expected
+):
+    events = seenby.events_of(content, joined=joined)
+    assert len(events) == len(expected)
+    for event, want in zip(events, as_rows(expected)):
+        assert event_fields(event, want) == approx_px(want)
+
+
+# -------- CRP-26 (main(): the events of a spread moment get no box)
+
+
+def crp_26_run(monkeypatch, capsys, tmp_path, samples):
+    ring = {c: v for c, v in box(2, 1, 12, 6).items() if c[0] in (2, 13) or c[1] in (1, 6)}
+    small = box(16, 7, 2, 2)
+    return run_main(
+        monkeypatch, capsys, tmp_path, ["clip.mp4", "out"], static(len(samples)),
+        probe=(2.0, 160, 80), samples=[S(ring) if s == "ring" else S(small) if s == "small" else S({}) for s in samples],
+        changes=[None, (grid(ring | small), Z)], crops=None,
+    )
+
+
+@pytest.mark.spec("CRP-26")
+def test_crp_26_a_spread_moment_is_a_new_screen_and_gets_no_box(monkeypatch, capsys, tmp_path):
+    samples = [None, "ring"] + [None] * 5 + ["small", None]
+    run = crp_26_run(monkeypatch, capsys, tmp_path, samples)
+    assert run.rc == 0
+    data = manifest()
+    assert [(f["time"], f["reason"]) for f in data["frames"]] == [(0.0, "first"), (2.0, "last")]
+    assert [e["region"] for e in data["events"]] == [[16, 8, 96, 48], [128, 56, 16, 16]]
+    assert run.contact_sheets_boxes == [[[], [(123, 51, 26, 26)]]]
+
+
+@pytest.mark.spec("CRP-26")
+def test_crp_26_a_spread_moment_whose_screen_is_dropped_as_a_transition_keeps_its_boxes(
+    monkeypatch, capsys, tmp_path
+):
+    samples = [None, "ring", None, "small", None]
+    run = crp_26_run(monkeypatch, capsys, tmp_path, samples)
+    assert run.rc == 0
+    assert run.contact_sheets_boxes == [[[], [(11, 3, 106, 58), (123, 51, 26, 26)]]]
+
+
+@pytest.mark.spec("CRP-26")
+def test_crp_26_a_spread_moment_keeps_its_boxes_when_crop_units_raised(monkeypatch, capsys, tmp_path):
+    def broken(events, width, height, samples):
+        raise KeyError("x")
+
+    monkeypatch.setattr(seenby, "crop_units", broken)
+    samples = [None, "ring"] + [None] * 5 + ["small", None]
+    run = crp_26_run(monkeypatch, capsys, tmp_path, samples)
+    assert run.rc == 0
+    assert run.err == "  crops not written: KeyError: 'x'\n"
+    assert run.contact_sheets_boxes == [[[], [(11, 3, 106, 58), (123, 51, 26, 26)]]]
